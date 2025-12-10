@@ -1,0 +1,10 @@
+ext {
+    extName = 'Fans MTL'
+    extClass = '.FansMTL'
+    themePkg = 'readwn'
+    baseUrl = 'https://www.fanmtl.com'
+    overrideVersionCode = 1
+    isNsfw = false
+}
+
+apply from: "$rootDir/common.gradle"

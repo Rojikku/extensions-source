@@ -1,0 +1,11 @@
+ext {
+    extName = 'Ippo Translation'
+    extClass = '.IppoTranslation'
+    themePkg = 'lightnovelwpnovel'
+    baseUrl = 'https://ippotranslations.com'
+    overrideVersionCode = 1
+    isNsfw = false
+    isNovel = true
+}
+
+apply from: "$rootDir/common.gradle"

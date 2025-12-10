@@ -1,0 +1,10 @@
+ext {
+    extName = 'AllNovelFull'
+    extClass = '.AllNovelFull'
+    themePkg = 'readnovelfull'
+    baseUrl = 'https://novgo.net'
+    overrideVersionCode = 1
+    isNsfw = false
+}
+
+apply from: "$rootDir/common.gradle"

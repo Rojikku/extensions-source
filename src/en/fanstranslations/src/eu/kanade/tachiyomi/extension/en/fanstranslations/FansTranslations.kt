@@ -1,0 +1,9 @@
+package eu.kanade.tachiyomi.extension.en.fanstranslations
+
+import eu.kanade.tachiyomi.multisrc.madaranovel.MadaraNovel
+
+class FansTranslations : MadaraNovel(
+    baseUrl = "https://fanstranslations.com",
+    name = "Fans Translations",
+    lang = "en",
+)

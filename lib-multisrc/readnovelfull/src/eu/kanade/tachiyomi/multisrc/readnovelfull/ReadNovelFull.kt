@@ -1,0 +1,285 @@
+package eu.kanade.tachiyomi.multisrc.readnovelfull
+
+import eu.kanade.tachiyomi.network.GET
+import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.source.NovelSource
+import eu.kanade.tachiyomi.source.model.Filter
+import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.Page
+import eu.kanade.tachiyomi.source.model.SChapter
+import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.online.ParsedHttpSource
+import eu.kanade.tachiyomi.util.asJsoup
+import okhttp3.FormBody
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Request
+import okhttp3.Response
+import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
+import java.text.SimpleDateFormat
+import java.util.Locale
+
+/**
+ * ReadNovelFull multisrc base class.
+ * Ported from LNReader TypeScript plugin.
+ *
+ * Sites using this template:
+ * - readnovelfull.com
+ * - allnovel.org
+ * - novelfull.com
+ * - boxnovel/novlove.com
+ * - libread.com
+ * - freewebnovel.com
+ * - allnovelfull/novgo.net
+ * - novelbin.com
+ * - lightnovelplus.com
+ */
+abstract class ReadNovelFull(
+    override val name: String,
+    override val baseUrl: String,
+    override val lang: String,
+) : ParsedHttpSource(), NovelSource {
+
+    override val supportsLatest = true
+
+    override val client = network.cloudflareClient
+
+    // Configuration options - can be overridden by child classes
+    protected open val latestPage: String = "latest-release-novel"
+    protected open val searchPage: String = "search"
+    protected open val chapterListing: String? = "ajax/chapter-archive"
+    protected open val chapterParam: String = "novelId"
+    protected open val pageParam: String = "page"
+    protected open val searchKey: String = "keyword"
+    protected open val postSearch: Boolean = false
+    protected open val noAjax: Boolean = false
+    protected open val pageAsPath: Boolean = false
+
+    override fun headersBuilder() = super.headersBuilder()
+        .add("Referer", "$baseUrl/")
+
+    // ======================== Popular ========================
+
+    override fun popularMangaRequest(page: Int): Request {
+        return if (pageAsPath && page > 1) {
+            GET("$baseUrl/most-popular/$page", headers)
+        } else {
+            GET("$baseUrl/most-popular?$pageParam=$page", headers)
+        }
+    }
+
+    override fun popularMangaSelector() = "div.col-novel-main div.list-novel div.row, div.archive div.row"
+
+    override fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
+        val link = element.selectFirst("h3.novel-title a, .novel-title a, a.cover")
+        if (link != null) {
+            title = link.text().trim().ifEmpty { link.attr("title") }
+            setUrlWithoutDomain(link.attr("abs:href"))
+        } else {
+            // Fallback - try to find any link in the element
+            element.selectFirst("a[href]")?.let {
+                title = it.attr("title").ifEmpty { it.text().trim() }
+                setUrlWithoutDomain(it.attr("abs:href"))
+            }
+        }
+        thumbnail_url = element.selectFirst("img")?.let {
+            it.attr("data-src").ifEmpty { it.attr("src") }
+        }
+    }
+
+    override fun popularMangaNextPageSelector() = "li.next:not(.disabled), ul.pagination li.active + li a"
+
+    // ======================== Latest ========================
+
+    override fun latestUpdatesRequest(page: Int): Request {
+        return if (pageAsPath && page > 1) {
+            GET("$baseUrl/$latestPage/$page", headers)
+        } else {
+            GET("$baseUrl/$latestPage?$pageParam=$page", headers)
+        }
+    }
+
+    override fun latestUpdatesSelector() = popularMangaSelector()
+
+    override fun latestUpdatesFromElement(element: Element) = popularMangaFromElement(element)
+
+    override fun latestUpdatesNextPageSelector() = popularMangaNextPageSelector()
+
+    // ======================== Search ========================
+
+    override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
+        return if (postSearch) {
+            val body = FormBody.Builder()
+                .add(searchKey, query)
+                .build()
+            POST("$baseUrl/$searchPage", headers, body)
+        } else {
+            val url = "$baseUrl/$searchPage".toHttpUrl().newBuilder()
+                .addQueryParameter(searchKey, query)
+                .addQueryParameter(pageParam, page.toString())
+                .build()
+            GET(url, headers)
+        }
+    }
+
+    override fun searchMangaSelector() = popularMangaSelector()
+
+    override fun searchMangaFromElement(element: Element) = popularMangaFromElement(element)
+
+    override fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
+
+    // ======================== Details ========================
+
+    override fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
+        document.selectFirst("div.books, div.book, div.m-imgtxt")?.let { info ->
+            thumbnail_url = info.selectFirst("img")?.let {
+                it.attr("data-src").ifEmpty { it.attr("src") }
+            }
+            title = info.selectFirst("h3.title, img")?.let {
+                it.attr("title").ifEmpty { it.text() }
+            } ?: ""
+        }
+
+        // Parse info section
+        document.select("div.info div, ul.info-meta li").forEach { element ->
+            val text = element.text()
+            when {
+                text.contains("Author", ignoreCase = true) -> {
+                    author = element.select("a").joinToString { it.text().trim() }
+                        .ifEmpty { text.substringAfter(":").trim() }
+                }
+                text.contains("Genre", ignoreCase = true) -> {
+                    genre = element.select("a").joinToString { it.text().trim() }
+                        .ifEmpty { text.substringAfter(":").trim() }
+                }
+                text.contains("Status", ignoreCase = true) -> {
+                    status = parseStatus(text.substringAfter(":").trim())
+                }
+            }
+        }
+
+        description = document.selectFirst("div.desc-text, div.inner, div.desc")?.text()?.trim()
+    }
+
+    private fun parseStatus(status: String): Int = when {
+        status.contains("Ongoing", ignoreCase = true) -> SManga.ONGOING
+        status.contains("Completed", ignoreCase = true) -> SManga.COMPLETED
+        status.contains("Hiatus", ignoreCase = true) -> SManga.ON_HIATUS
+        status.contains("Dropped", ignoreCase = true) -> SManga.CANCELLED
+        status.contains("Cancelled", ignoreCase = true) -> SManga.CANCELLED
+        else -> SManga.UNKNOWN
+    }
+
+    // ======================== Chapters ========================
+
+    override fun chapterListParse(response: Response): List<SChapter> {
+        val document = response.asJsoup()
+        val novelPath = response.request.url.encodedPath
+
+        // Try to get chapters from AJAX endpoint
+        if (!noAjax) {
+            val novelId = document.selectFirst("div#rating")?.attr("data-novel-id")
+                ?: novelPath.replace(Regex("[^0-9]"), "").takeIf { it.isNotEmpty() }
+
+            if (novelId != null && chapterListing != null) {
+                try {
+                    val ajaxUrl = "$baseUrl/$chapterListing?$chapterParam=$novelId"
+                    val ajaxResponse = client.newCall(GET(ajaxUrl, headers)).execute()
+                    val ajaxDocument = ajaxResponse.asJsoup()
+
+                    val chapters = ajaxDocument.select("ul.list-chapter li a, select option[value]").mapIndexedNotNull { index, element ->
+                        val chapterUrl = if (element.tagName() == "option") {
+                            element.attr("value")
+                        } else {
+                            element.attr("abs:href")
+                        }
+
+                        // Skip if URL is empty
+                        if (chapterUrl.isBlank()) return@mapIndexedNotNull null
+
+                        SChapter.create().apply {
+                            setUrlWithoutDomain(chapterUrl)
+                            name = if (element.tagName() == "option") {
+                                element.text().trim().ifEmpty { "Chapter ${index + 1}" }
+                            } else {
+                                element.attr("title").ifEmpty { element.text().trim() }
+                            }
+                            chapter_number = (index + 1).toFloat()
+                        }
+                    }
+
+                    if (chapters.isNotEmpty()) {
+                        return chapters
+                    }
+                } catch (e: Exception) {
+                    // Fall back to parsing from page
+                }
+            }
+        }
+
+        // Parse chapters directly from page (noAjax mode or fallback)
+        return document.select("ul#idData li a, div.chapter-list a, ul.list-chapter li a").mapIndexedNotNull { index, element ->
+            val chapterUrl = element.attr("abs:href")
+            // Skip if URL is empty
+            if (chapterUrl.isBlank()) return@mapIndexedNotNull null
+
+            SChapter.create().apply {
+                setUrlWithoutDomain(chapterUrl)
+                name = element.attr("title").ifEmpty { element.text().trim() }
+                chapter_number = (index + 1).toFloat()
+            }
+        }
+    }
+
+    override fun chapterListSelector() = throw UnsupportedOperationException()
+
+    override fun chapterFromElement(element: Element) = throw UnsupportedOperationException()
+
+    // ======================== Pages ========================
+
+    override fun pageListParse(document: Document): List<Page> {
+        // For novel sources, we return a single page that will contain the text
+        return listOf(Page(0, document.location()))
+    }
+
+    override fun imageUrlParse(document: Document): String = ""
+
+    // ======================== Novel Content ========================
+
+    override suspend fun fetchPageText(page: Page): String {
+        val response = client.newCall(GET(page.url, headers)).execute()
+        val document = response.asJsoup()
+
+        // Try multiple selectors for chapter content
+        val contentSelectors = listOf(
+            "div#chr-content",
+            "div#chapter-content",
+            "div.txt",
+            "div.chapter-content",
+            "div.content",
+        )
+
+        for (selector in contentSelectors) {
+            val content = document.selectFirst(selector)
+            if (content != null) {
+                // Remove ads and unwanted elements
+                content.select("div.ads, div.unlock-buttons, sub, script, ins, .adsbygoogle").remove()
+
+                // Get clean HTML content
+                return content.html()
+            }
+        }
+
+        return ""
+    }
+
+    // ======================== Filters ========================
+
+    override fun getFilterList(): FilterList = FilterList(
+        Filter.Header("Filters are not supported for this source"),
+    )
+
+    companion object {
+        private val DATE_FORMAT = SimpleDateFormat("MMM dd, yyyy", Locale.US)
+    }
+}

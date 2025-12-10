@@ -1,0 +1,10 @@
+ext {
+    extName = 'FreeWebNovel'
+    extClass = '.FreeWebNovel'
+    themePkg = 'readnovelfull'
+    baseUrl = 'https://freewebnovel.com'
+    overrideVersionCode = 1
+    isNsfw = false
+}
+
+apply from: "$rootDir/common.gradle"

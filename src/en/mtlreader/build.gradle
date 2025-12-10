@@ -1,0 +1,9 @@
+ext {
+    extName = 'MTL Reader'
+    extClass = '.MtlReader'
+    extVersionCode = 1
+    isNsfw = false
+    isNovel = true
+}
+
+apply from: "$rootDir/common.gradle"

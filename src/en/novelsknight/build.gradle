@@ -1,0 +1,10 @@
+ext {
+    extName = 'Novels Knight'
+    extClass = '.NovelsKnight'
+    themePkg = 'lightnovelwp'
+    baseUrl = 'https://novelsknight.punchmanga.online'
+    overrideVersionCode = 1
+    isNsfw = false
+}
+
+apply from: "$rootDir/common.gradle"

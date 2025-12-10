@@ -1,6 +1,6 @@
 ext {
     extName = 'WebNovel'
-    extClass = '.WebNovel'
+    extClass = '.WebNovelFactory'
     extVersionCode = 13
 }
 

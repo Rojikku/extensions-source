@@ -1,0 +1,11 @@
+ext {
+    extName = 'Hiraeth Translation'
+    extClass = '.HiraethTranslation'
+    themePkg = 'madaranovel'
+    baseUrl = 'https://hireaththranslation.com'
+    overrideVersionCode = 1
+    isNsfw = false
+    isNovel = true
+}
+
+apply from: "$rootDir/common.gradle"

@@ -1,0 +1,9 @@
+ext {
+    extName = 'ReadFromNet'
+    extClass = '.ReadFromNet'
+    extVersionCode = 1
+    isNsfw = false
+    isNovel = true
+}
+
+apply from: "$rootDir/common.gradle"

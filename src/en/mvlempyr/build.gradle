@@ -1,0 +1,9 @@
+ext {
+    extName = 'MVLEMPYR'
+    extClass = '.MVLEMPYR'
+    extVersionCode = 1
+    isNsfw = false
+    isNovel = true
+}
+
+apply from: "$rootDir/common.gradle"
