@@ -127,7 +127,6 @@ jobs:
 
       - name: Upload APKs (${{ matrix.chunk.number }})
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
-        if: ${{ github.repository == env.SOURCE_REPOSITORY }}
         with:
           name: "individual-apks-${{ matrix.chunk.number }}"
           path: "**/*.apk"
@@ -139,10 +138,17 @@ jobs:
   publish:
     name: Publish extension repo
     needs: [prepare, build]
-    if: ${{ github.repository == 'mrissaoussama/extensions-source' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Skip publish when not running in SOURCE_REPOSITORY
+        run: |
+          # GITHUB_REPOSITORY is available automatically and is the current repository in the form owner/name
+          if [ "${GITHUB_REPOSITORY}" != "${SOURCE_REPOSITORY}" ]; then
+            echo "Not running in SOURCE_REPOSITORY (${SOURCE_REPOSITORY}), skipping publish job.";
+            exit 0;
+          fi
+
       - name: Download APK artifacts
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
         with:
@@ -161,12 +167,34 @@ jobs:
           path: main
           persist-credentials: false
 
-      - name: Create repo artifacts
+      - name: Create repo artifacts (move APKs and run Inspector)
         run: |
           cd main
           python ./.github/scripts/move-built-apks.py
-          echo "Moved APKs:"
-          ls -1 *.apk || true
+
+          # Ensure any artifacts downloaded by the workflow are included. Download step saves
+          # artifacts to ~/apk-artifacts — copy them into the repo/apk directory so Inspector
+          # will see all APKs.
+          mkdir -p repo/apk || true
+          echo "Copying artifacts from ~/apk-artifacts to main/repo/apk"
+          cp -a ~/apk-artifacts/* repo/apk/ || true
+
+          # Download Inspector release and run it to produce output.json used by create-repo.py
+          # Inspector is used to inspect APKs and produce a JSON metadata file (output.json).
+          # It installs APKs into a simulated Android environment and extracts metadata used
+          # by create-repo.py to generate the index files. Removing Inspector breaks create-repo.py
+          # because it expects output.json to exist.
+          echo "Looking up latest Inspector release..."
+          INSPECTOR_LINK="$(curl -s "https://api.github.com/repos/keiyoushi/extensions-inspector/releases/latest" | jq -r '.assets[0].browser_download_url')"
+          echo "Inspector download link: $INSPECTOR_LINK"
+          curl -L "$INSPECTOR_LINK" -o ./Inspector.jar
+
+          echo "Running Inspector to generate output.json"
+          java -jar ./Inspector.jar "repo/apk" "output.json" "tmp" || { echo "Inspector failed"; exit 1; }
+
+          echo "Inspector output files:"; ls -lah output.json tmp || true
+
+          python ./.github/scripts/create-repo.py
 
       - name: Check remote access to publish repo
         run: |
@@ -176,9 +204,7 @@ jobs:
             echo "BOT_PAT is empty or not set; checkout may fail"
             exit 1
           fi
-          # Try to list remote heads to ensure token works
           REPO_URL="https://${{ secrets.BOT_PAT }}@github.com/${{ env.PUBLISH_REPOSITORY }}.git"
-          echo "Listing remote heads for $REPO_URL"
           git ls-remote --heads "$REPO_URL" || { echo "git ls-remote failed"; exit 1; }
         shell: bash
 
