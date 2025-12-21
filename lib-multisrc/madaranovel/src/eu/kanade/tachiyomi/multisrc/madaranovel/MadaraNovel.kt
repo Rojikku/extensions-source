@@ -1,7 +1,11 @@
 package eu.kanade.tachiyomi.multisrc.madaranovel
 
+import android.content.SharedPreferences
+import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.NovelSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -10,6 +14,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import keiyoushi.utils.getPreferencesLazy
 import kotlinx.serialization.json.Json
 import okhttp3.FormBody
 import okhttp3.Request
@@ -22,19 +27,60 @@ import java.util.Calendar
 /**
  * Base class for Madara Engine powered novel sites.
  * Handles common parsing and request logic.
+ * @see https://github.com/LNReader/lnreader-plugins madara/template.ts
  */
 open class MadaraNovel(
     override val baseUrl: String,
     override val name: String,
     override val lang: String = "en",
-) : HttpSource(), NovelSource {
+) : HttpSource(), NovelSource, ConfigurableSource {
+
+    // isNovelSource is provided by NovelSource interface with default value true
 
     override val supportsLatest = true
     override val client = network.cloudflareClient
 
     protected val json: Json by injectLazy()
 
-    protected open val useNewChapterEndpoint = false
+    private val preferences: SharedPreferences by getPreferencesLazy()
+
+    /**
+     * Override this in subclass to set default value.
+     * When useNewChapterEndpoint = true: Uses POST to $novelUrl/ajax/chapters/
+     * When useNewChapterEndpoint = false: Uses POST to /wp-admin/admin-ajax.php with manga ID
+     */
+    protected open val useNewChapterEndpointDefault = false
+
+    /**
+     * Whether to use the new chapter endpoint (POST to /ajax/chapters/).
+     * Can be toggled in extension settings if not overridden.
+     */
+    protected val useNewChapterEndpoint: Boolean
+        get() = preferences.getBoolean(USE_NEW_CHAPTER_ENDPOINT_PREF, useNewChapterEndpointDefault)
+
+    // LN Reader: Captcha title checks
+    private val captchaTitles = listOf(
+        "Bot Verification",
+        "You are being redirected...",
+        "Un instant...",
+        "Just a moment...",
+        "Redirecting...",
+    )
+
+    /**
+     * LN Reader: Check for captcha/bot verification pages
+     * Throws exception to prompt webview open
+     */
+    protected fun checkCaptcha(doc: Document, url: String) {
+        val title = doc.title().trim()
+        if (captchaTitles.contains(title)) {
+            throw Exception("Captcha detected, please open in WebView")
+        }
+        // Also check for Cloudflare Turnstile
+        if (doc.selectFirst("script[src*='challenges.cloudflare.com/turnstile']") != null) {
+            throw Exception("Cloudflare Turnstile detected, please open in WebView")
+        }
+    }
 
     override fun popularMangaRequest(page: Int): Request {
         val url = "$baseUrl/page/$page/?s=&post_type=wp-manga"
@@ -82,19 +128,53 @@ open class MadaraNovel(
     protected fun parseNovels(doc: Document): List<SManga> {
         doc.select(".manga-title-badges").remove()
 
-        return doc.select(".page-item-detail, .c-tabs-item__content").mapNotNull { element ->
+        // Comprehensive selector for various Madara theme layouts:
+        // - .page-item-detail: Standard novel list item
+        // - .c-tabs-item__content: Tab content items
+        // - .item-thumb.c-image-hover: Thumbnail items
+        // - .tab-thumb.c-image-hover: Tab thumbnail items
+        // - div.col-4, div.col-md-2, div.col-12.col-md-4: Grid layouts (FansTranslations, etc)
+        // - div.hover-details: Hover detail items (SonicMTL)
+        // - .badge-pos-2: Badge position items (HiraethTranslation)
+        return doc.select(
+            ".page-item-detail, .c-tabs-item__content, .item-thumb.c-image-hover, " +
+                ".tab-thumb.c-image-hover, div.col-4, div.col-md-2, div.col-12.col-md-4, " +
+                "div.hover-details, .badge-pos-2 .page-item-detail",
+        ).mapNotNull { element ->
             try {
-                val title = element.selectFirst(".post-title")?.text()?.trim() ?: return@mapNotNull null
-                val url = element.selectFirst(".post-title a")?.attr("href") ?: return@mapNotNull null
+                val title = element.selectFirst(".post-title")?.text()?.trim()
+                    ?: element.selectFirst("a")?.attr("title")?.ifEmpty { null }
+                    ?: return@mapNotNull null
+                val url = element.selectFirst(".post-title a")?.attr("href")
+                    ?: element.selectFirst("a")?.attr("href")
+                    ?: return@mapNotNull null
+
+                // Ensure URL is relative path (not full URL)
+                val relativeUrl = when {
+                    url.startsWith(baseUrl) -> url.removePrefix(baseUrl)
+                    url.startsWith("http://") || url.startsWith("https://") -> {
+                        // Extract path from full URL
+                        try {
+                            java.net.URI(url).path
+                        } catch (e: Exception) {
+                            url
+                        }
+                    }
+                    url.startsWith("/") -> url
+                    else -> "/$url"
+                }
+
                 val image = element.selectFirst("img")
-                val cover = image?.attr("data-src")
-                    ?: image?.attr("src")
-                    ?: image?.attr("data-lazy-srcset")
+                val cover = image?.attr("data-lazy-src")?.ifEmpty { null }
+                    ?: image?.attr("data-src")?.ifEmpty { null }
+                    ?: image?.attr("src")?.ifEmpty { null }
+                    ?: image?.attr("data-lazy-srcset")?.split(" ")?.firstOrNull()
+                    ?: image?.attr("srcset")?.split(" ")?.firstOrNull()
                     ?: ""
 
                 SManga.create().apply {
                     this.title = title
-                    this.url = url.replace(baseUrl, "")
+                    this.url = relativeUrl
                     thumbnail_url = cover
                 }
             } catch (e: Exception) {
@@ -108,9 +188,21 @@ open class MadaraNovel(
     override fun mangaDetailsParse(response: Response): SManga {
         val doc = response.asJsoup()
 
+        // LN Reader: Check for captcha before parsing
+        checkCaptcha(doc, response.request.url.toString())
+
         doc.select(".manga-title-badges, #manga-title span").remove()
 
         return SManga.create().apply {
+            title = doc.selectFirst(".post-title h1, #manga-title h1")?.text()?.trim() ?: ""
+
+            // Get cover from summary image
+            thumbnail_url = doc.selectFirst(".summary_image img")?.let { img ->
+                img.attr("data-lazy-src").ifEmpty { null }
+                    ?: img.attr("data-src").ifEmpty { null }
+                    ?: img.attr("src").ifEmpty { null }
+            }
+
             description = doc.selectFirst("div.summary__content")?.text()?.trim()
                 ?: doc.selectFirst("#tab-manga-about")?.text()?.trim()
                 ?: doc.selectFirst(".manga-excerpt")?.text()?.trim()
@@ -122,9 +214,12 @@ open class MadaraNovel(
                 ?: ""
             genre = doc.select(".post-content_item, .post-content")
                 .filter { element ->
-                    val h5Text = element.selectFirst("h5")?.text()?.trim() ?: ""
-                    h5Text.contains("Genre", ignoreCase = true) ||
-                        h5Text.contains("Tags", ignoreCase = true)
+                    val h5Text = element.selectFirst("h5")?.text()?.trim()?.lowercase() ?: ""
+                    // Match various genre/tag label variations (including i18n)
+                    h5Text.contains("genre") ||
+                        h5Text.contains("tag") ||
+                        h5Text.contains("género") ||
+                        h5Text.contains("التصنيفات")
                 }
                 .mapNotNull { it.selectFirst(".summary-content")?.select("a") }
                 .flatten()
@@ -148,17 +243,24 @@ open class MadaraNovel(
         val mangaUrl = response.request.url.encodedPath
 
         val chapters = mutableListOf<SChapter>()
-        var html = ""
+        var html: String
 
         if (useNewChapterEndpoint) {
             val emptyBody = FormBody.Builder().build()
+            val newHeaders = headersBuilder()
+                .set("Referer", response.request.url.toString())
+                .build()
             val chapResponse = client.newCall(
-                POST("$baseUrl${mangaUrl}ajax/chapters/", headers, emptyBody),
+                POST("$baseUrl${mangaUrl}ajax/chapters/", newHeaders, emptyBody),
             ).execute()
             html = chapResponse.body.string()
         } else {
+            // Extract novel ID from various sources
             val novelId = doc.selectFirst(".rating-post-id")?.attr("value")
                 ?: doc.selectFirst("#manga-chapters-holder")?.attr("data-id")
+                // Fallback: extract from shortlink (e.g., <link rel="shortlink" href="...?p=91245">)
+                ?: doc.selectFirst("link[rel=shortlink]")?.attr("href")
+                    ?.let { Regex("""[?&]p=(\d+)""").find(it)?.groupValues?.get(1) }
                 ?: ""
 
             val formBody = FormBody.Builder()
@@ -189,9 +291,19 @@ open class MadaraNovel(
                     val chapterUrl = element.selectFirst("a")?.attr("href") ?: return@forEachIndexed
 
                     if (chapterUrl != "#") {
+                        // Ensure URL is relative path
+                        val relativeChapterUrl = when {
+                            chapterUrl.startsWith(baseUrl) -> chapterUrl.removePrefix(baseUrl)
+                            chapterUrl.startsWith("http://") || chapterUrl.startsWith("https://") -> {
+                                try { java.net.URI(chapterUrl).path } catch (e: Exception) { chapterUrl }
+                            }
+                            chapterUrl.startsWith("/") -> chapterUrl
+                            else -> "/$chapterUrl"
+                        }
+
                         chapters.add(
                             SChapter.create().apply {
-                                url = chapterUrl.replace(baseUrl, "")
+                                url = relativeChapterUrl
                                 name = chapterName
                                 date_upload = parseDate(releaseDate)
                                 chapter_number = (totalChaps - index).toFloat()
@@ -207,7 +319,15 @@ open class MadaraNovel(
         return chapters.reversed()
     }
 
-    override fun pageListParse(response: Response): List<Page> = emptyList()
+    /**
+     * For novel sources, we return a single Page containing the chapter URL.
+     * The actual content is fetched via fetchPageText() which is called for NovelSource.
+     */
+    override fun pageListParse(response: Response): List<Page> {
+        // Return a page with the chapter URL - the content will be fetched via fetchPageText
+        val url = response.request.url.encodedPath
+        return listOf(Page(0, url))
+    }
 
     override fun imageUrlParse(response: Response): String = ""
 
@@ -215,11 +335,51 @@ open class MadaraNovel(
         val response = client.newCall(GET(baseUrl + page.url, headers)).execute()
         val doc = response.asJsoup()
 
-        return doc.selectFirst(".text-left")?.html()
-            ?: doc.selectFirst(".text-right")?.html()
-            ?: doc.selectFirst(".entry-content")?.html()
-            ?: doc.selectFirst(".c-blog-post > div > div:nth-child(2)")?.html()
-            ?: ""
+        // LN Reader: Check for captcha before parsing
+        checkCaptcha(doc, baseUrl + page.url)
+
+        // Remove ads and unwanted elements FIRST (comprehensive list from LN Reader)
+        doc.select(
+            "div.ads, div.unlock-buttons, sub, script, ins, .adsbygoogle, .code-block, noscript, " +
+                "div[id*=google], div[id*=bidgear], div[class*=bidgear], div[class*=google-tag], " +
+                "iframe, .foxaholic-google-tag-manager-body, .foxaholic-bidgear-before-content-1x1, " +
+                ".foxaholic-bidgear-banner-before-content, div[id^=bg-ssp], " +
+                ".adx-zone, .adx-head, [id*='-ad-'], [class*='-ad-'], .ad-container",
+        ).remove()
+
+        // Try multiple selectors for chapter content
+        // Look for the largest content block among candidates
+        val candidates = listOf(
+            doc.selectFirst(".text-left"),
+            doc.selectFirst(".text-right"),
+            doc.selectFirst(".reading-content .text-left"),
+            doc.selectFirst(".reading-content .text-right"),
+            doc.selectFirst(".entry-content"),
+            doc.selectFirst(".c-blog-post > div > div:nth-child(2)"),
+            doc.selectFirst(".reading-content"),
+            doc.selectFirst(".chapter-content"),
+        ).filterNotNull()
+
+        // Select the candidate with the most paragraph tags (actual content)
+        val contentElement = candidates.maxByOrNull { element ->
+            element.select("p").sumOf { it.text().length }
+        }
+
+        if (preferences.getBoolean(PREF_RAW_HTML, false)) {
+            return contentElement?.html() ?: doc.html()
+        }
+
+        // Get the content HTML and clean up any remaining script artifacts
+        var content = contentElement?.html() ?: ""
+
+        // Remove any inline scripts that may have been left
+        content = content.replace(Regex("<script[^>]*>.*?</script>", RegexOption.DOT_MATCHES_ALL), "")
+        // Remove adsbygoogle push calls
+        content = content.replace(Regex("""\(adsbygoogle[^)]*\)[^;]*;?"""), "")
+        // Remove empty divs
+        content = content.replace(Regex("""<div[^>]*>\s*</div>"""), "")
+
+        return content.trim()
     }
 
     override fun getFilterList(): FilterList = FilterList(
@@ -251,6 +411,29 @@ open class MadaraNovel(
     }
 
     protected fun Response.asJsoup(): Document = Jsoup.parse(body.string())
+
+    // ======================== Settings ========================
+
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        SwitchPreferenceCompat(screen.context).apply {
+            key = USE_NEW_CHAPTER_ENDPOINT_PREF
+            title = "Use New Chapter Endpoint"
+            summary = "Uses POST to /ajax/chapters/ instead of admin-ajax.php. Try toggling if chapters don't load."
+            setDefaultValue(useNewChapterEndpointDefault)
+        }.also(screen::addPreference)
+
+        SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_RAW_HTML
+            title = "Return raw HTML"
+            summary = "If enabled, returns the raw HTML of the chapter content instead of parsed text. Useful for custom parsers."
+            setDefaultValue(false)
+        }.also(screen::addPreference)
+    }
+
+    companion object {
+        private const val USE_NEW_CHAPTER_ENDPOINT_PREF = "pref_use_new_chapter_endpoint"
+        private const val PREF_RAW_HTML = "pref_raw_html"
+    }
 
     private class StatusFilter : Filter.Select<String>(
         "Status",

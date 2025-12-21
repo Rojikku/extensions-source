@@ -1,0 +1,11 @@
+ext {
+    extName = 'WebNovel Translation'
+    extClass = '.WebNovelTranslation'
+    themePkg = 'madaranovel'
+    baseUrl = 'https://webnoveltranslation.com'
+    overrideVersionCode = 1
+    isNsfw = false
+    isNovel = true
+}
+
+apply from: "$rootDir/common.gradle"

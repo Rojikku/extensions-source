@@ -1,11 +1,103 @@
 package eu.kanade.tachiyomi.extension.en.sonicmtl
 
 import eu.kanade.tachiyomi.multisrc.madaranovel.MadaraNovel
+import eu.kanade.tachiyomi.source.model.Filter
+import eu.kanade.tachiyomi.source.model.FilterList
 
 class SonicMTL : MadaraNovel(
     baseUrl = "https://www.sonicmtl.com",
     name = "Sonic MTL",
     lang = "en",
 ) {
-    override val useNewChapterEndpoint = true
+    override val useNewChapterEndpointDefault = true
+
+    override fun getFilterList() = FilterList(
+        GenreFilter(),
+        StatusFilter(),
+        SortFilter(),
+    )
+
+    private class GenreFilter : Filter.Group<Genre>(
+        "Genre",
+        listOf(
+            Genre("Action", "action"),
+            Genre("Adult", "adult"),
+            Genre("Adventure", "adventure"),
+            Genre("Comedy", "comedy"),
+            Genre("Cooking", "cooking"),
+            Genre("Detective", "detective"),
+            Genre("Doujinshi", "doujinshi"),
+            Genre("Drama", "drama"),
+            Genre("Ecchi", "ecchi"),
+            Genre("Fan-Fiction", "fan-fiction"),
+            Genre("Fantasy", "fantasy"),
+            Genre("Gender Bender", "gender-bender"),
+            Genre("Harem", "harem"),
+            Genre("Historical", "historical"),
+            Genre("Horror", "horror"),
+            Genre("Josei", "josei"),
+            Genre("Live action", "live-action"),
+            Genre("Manga", "manga"),
+            Genre("Manhua", "manhua"),
+            Genre("Manhwa", "manhwa"),
+            Genre("Martial Arts", "martial-arts"),
+            Genre("Mature", "mature"),
+            Genre("Mecha", "mecha"),
+            Genre("Mystery", "mystery"),
+            Genre("One shot", "one-shot"),
+            Genre("Psychological", "psychological"),
+            Genre("Romance", "romance"),
+            Genre("School Life", "school-life"),
+            Genre("Sci-fi", "sci-fi"),
+            Genre("Seinen", "seinen"),
+            Genre("Shoujo", "shoujo"),
+            Genre("Shoujo Ai", "shoujo-ai"),
+            Genre("Shounen", "shounen"),
+            Genre("Shounen Ai", "shounen-ai"),
+            Genre("Slice of Life", "slice-of-life"),
+            Genre("Smut", "smut"),
+            Genre("Soft Yaoi", "soft-yaoi"),
+            Genre("Soft Yuri", "soft-yuri"),
+            Genre("Sports", "sports"),
+            Genre("Supernatural", "supernatural"),
+            Genre("Tragedy", "tragedy"),
+            Genre("Urban Life", "urban-life"),
+            Genre("Wuxia", "wuxia"),
+            Genre("Xianxia", "xianxia"),
+            Genre("Xuanhuan", "xuanhuan"),
+            Genre("Yaoi", "yaoi"),
+            Genre("Yuri", "yuri"),
+        ),
+    )
+
+    private class Genre(name: String, val id: String) : Filter.CheckBox(name)
+
+    private class StatusFilter : Filter.Select<String>(
+        "Status",
+        arrayOf("All", "OnGoing", "Completed", "Canceled", "On Hold", "Upcoming"),
+    ) {
+        fun toUriPart() = when (state) {
+            1 -> "on-going"
+            2 -> "end"
+            3 -> "canceled"
+            4 -> "on-hold"
+            5 -> "upcoming"
+            else -> ""
+        }
+    }
+
+    private class SortFilter : Filter.Select<String>(
+        "Order by",
+        arrayOf("Relevance", "Latest", "A-Z", "Rating", "Trending", "Most Views", "New"),
+    ) {
+        fun toUriPart() = when (state) {
+            1 -> "latest"
+            2 -> "alphabet"
+            3 -> "rating"
+            4 -> "trending"
+            5 -> "views"
+            6 -> "new-manga"
+            else -> ""
+        }
+    }
 }

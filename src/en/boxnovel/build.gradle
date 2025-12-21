@@ -5,6 +5,7 @@ ext {
     baseUrl = 'https://novlove.com'
     overrideVersionCode = 1
     isNsfw = false
+    isNovel = true
 }
 
 apply from: "$rootDir/common.gradle"

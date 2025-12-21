@@ -1,0 +1,11 @@
+ext {
+    extName = 'NeoSekai Translations'
+    extClass = '.NeoSekaiTranslations'
+    themePkg = 'madaranovel'
+    baseUrl = 'https://www.neosekaitranslations.com'
+    overrideVersionCode = 1
+    isNsfw = false
+    isNovel = true
+}
+
+apply from: "$rootDir/common.gradle"

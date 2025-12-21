@@ -1,0 +1,9 @@
+ext {
+    extName = 'Srank Manga'
+    extClass = '.SrankManga'
+    overrideVersionCode = 1
+    themePkg = 'madaranovel'
+    isNovel = true
+}
+
+apply from: "$rootDir/common.gradle"

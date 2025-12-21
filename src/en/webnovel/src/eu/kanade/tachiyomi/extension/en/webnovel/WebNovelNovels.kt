@@ -9,6 +9,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
@@ -24,7 +25,13 @@ class WebNovelNovels : HttpSource(), NovelSource {
 
     override val supportsLatest = true
 
+    override val isNovelSource = true
+
     override val client = network.cloudflareClient
+
+    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
+        .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        .add("Referer", baseUrl)
 
     // Popular
     override fun popularMangaRequest(page: Int): Request {
@@ -151,14 +158,14 @@ class WebNovelNovels : HttpSource(), NovelSource {
     override fun chapterListParse(response: Response): List<SChapter> {
         val document = Jsoup.parse(response.body.string())
         val chapters = mutableListOf<SChapter>()
-        document.select(".volume-item").forEach { volume ->
-            val volumeName = volume.ownText().trim().let { text ->
+        document.select(".volume-item").forEach volumeLoop@{ volumeItem ->
+            val volumeName = volumeItem.ownText().trim().let { text ->
                 val match = Regex("Volume\\s(\\d+)").find(text)
                 if (match != null) "Volume ${match.groupValues[1]}" else "Unknown Volume"
             }
 
-            volume.select("li").forEach { li ->
-                val a = li.selectFirst("a") ?: return@forEach
+            volumeItem.select("li").forEach chapterLoop@{ li ->
+                val a = li.selectFirst("a") ?: return@chapterLoop
                 val chapter = SChapter.create().apply {
                     val rawName = a.attr("title").trim()
                     name = "$volumeName: $rawName"
@@ -186,9 +193,19 @@ class WebNovelNovels : HttpSource(), NovelSource {
     override suspend fun fetchPageText(page: Page): String {
         val response = client.newCall(GET(baseUrl + page.url, headers)).execute()
         val document = Jsoup.parse(response.body.string())
-        val content = document.select(".cha-words").html()
-        return content.ifEmpty {
-            document.select(".cha-content").html()
+
+        // Remove bloat elements (same as TS plugin)
+        document.select(".para-comment").remove()
+
+        // TS plugin: .cha-tit + .cha-words
+        val title = document.selectFirst(".cha-tit")?.html() ?: ""
+        val content = document.selectFirst(".cha-words")?.html() ?: ""
+
+        return if (title.isNotEmpty() || content.isNotEmpty()) {
+            "$title$content"
+        } else {
+            // Fallback
+            document.selectFirst(".cha-content")?.html() ?: ""
         }
     }
 

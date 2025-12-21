@@ -5,6 +5,7 @@ ext {
     baseUrl = 'https://novelsknight.punchmanga.online'
     overrideVersionCode = 1
     isNsfw = false
+    isNovel = true
 }
 
 apply from: "$rootDir/common.gradle"

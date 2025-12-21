@@ -1,0 +1,11 @@
+ext {
+    extName = 'LibRead'
+    extClass = '.LibRead'
+    themePkg = 'readnovelfull'
+    baseUrl = 'https://libread.com'
+    overrideVersionCode = 1
+    isNsfw = false
+    isNovel = true
+}
+
+apply from: "$rootDir/common.gradle"

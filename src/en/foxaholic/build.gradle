@@ -2,7 +2,7 @@ ext {
     extName = 'Foxaholic'
     extClass = '.Foxaholic'
     themePkg = 'madaranovel'
-    baseUrl = 'https://foxaholic.com'
+    baseUrl = 'https://www.foxaholic.com'
     overrideVersionCode = 1
     isNsfw = false
     isNovel = true

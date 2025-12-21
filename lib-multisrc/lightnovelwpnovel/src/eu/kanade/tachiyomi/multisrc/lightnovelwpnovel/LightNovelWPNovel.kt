@@ -24,6 +24,8 @@ open class LightNovelWPNovel(
     override val lang: String = "en",
 ) : HttpSource(), NovelSource {
 
+    // isNovelSource is provided by NovelSource interface with default value true
+
     override val supportsLatest = true
     override val client = network.cloudflareClient
 
@@ -76,18 +78,37 @@ open class LightNovelWPNovel(
 
     override fun searchMangaParse(response: Response) = popularMangaParse(response)
 
+    /**
+     * Helper function to extract image URL from element with various attribute fallbacks
+     */
+    protected fun parseImageUrl(element: org.jsoup.nodes.Element?): String? {
+        return element?.attr("data-lazy-src")?.takeIf { it.isNotBlank() }
+            ?: element?.attr("data-src")?.takeIf { it.isNotBlank() }
+            ?: element?.attr("src")?.takeIf { it.isNotBlank() }
+            ?: element?.attr("data-lazy-srcset")?.takeIf { it.isNotBlank() }?.split(" ")?.firstOrNull()
+    }
+
     protected fun parseNovels(doc: Document): List<SManga> {
         return doc.select("article").mapNotNull { element ->
             try {
                 val titleElement = element.selectFirst("a[title]") ?: return@mapNotNull null
                 val title = titleElement.attr("title")
                 val url = titleElement.attr("href")
-                val image = element.selectFirst("img")
-                val cover = image?.attr("data-src") ?: image?.attr("src") ?: ""
+                // Try multiple image selectors - ts-post-image is used by LightNovelWP
+                val image = element.selectFirst(".ts-post-image img, .ts-post-image, img.ts-post-image, img")
+                val cover = parseImageUrl(image) ?: ""
 
                 SManga.create().apply {
                     this.title = title
-                    this.url = url.replace(baseUrl, "")
+                    // Ensure URL is relative path
+                    this.url = when {
+                        url.startsWith(baseUrl) -> url.removePrefix(baseUrl)
+                        url.startsWith("http://") || url.startsWith("https://") -> {
+                            try { java.net.URI(url).path } catch (e: Exception) { url }
+                        }
+                        url.startsWith("/") -> url
+                        else -> "/$url"
+                    }
                     thumbnail_url = cover
                 }
             } catch (e: Exception) {
@@ -101,6 +122,20 @@ open class LightNovelWPNovel(
     override fun mangaDetailsParse(response: Response): SManga {
         val doc = response.asJsoup()
         return SManga.create().apply {
+            // Get cover from detail page
+            val thumbImg = doc.selectFirst(".thumb img, .thumbook img, img.ts-post-image")
+            thumbnail_url = parseImageUrl(thumbImg)
+
+            // Parse title from multiple sources - always set it since it's lateinit
+            title = thumbImg?.attr("title")?.trim()?.takeIf { it.isNotBlank() }
+                ?: doc.selectFirst(".entry-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
+                ?: doc.selectFirst("meta[property=og:title]")?.attr("content")
+                    ?.substringBefore(" - ")?.trim()?.takeIf { it.isNotBlank() }
+                ?: doc.selectFirst("title")?.text()
+                    ?.substringBefore(" - ")?.trim()?.takeIf { it.isNotBlank() }
+                ?: doc.selectFirst(".post-title h1")?.text()?.trim()?.takeIf { it.isNotBlank() }
+                ?: "Unknown Title"
+
             description = doc.selectFirst(".entry-content, [itemprop=description]")?.text()?.trim() ?: ""
 
             val authorElement = doc.select(".spe span:contains(Author), .serl:contains(Author)").first()
@@ -134,14 +169,21 @@ open class LightNovelWPNovel(
             try {
                 val linkElement = element.selectFirst("a") ?: return@forEach
                 val url = linkElement.attr("href")
-                val chapterNum = element.selectFirst(".epl-num")?.text() ?: ""
-                val chapterTitle = element.selectFirst(".epl-title")?.text() ?: ""
-                val dateStr = element.selectFirst(".epl-date")?.text() ?: ""
 
-                // Check for locked status
-                val isLocked = element.select(".epl-price").text().let {
-                    !it.contains("Free", ignoreCase = true) && it.isNotEmpty()
-                } || chapterNum.contains("🔒")
+                // epl-num structure: <div class="epl-num"><span>Ch. 50</span><span><i class="fas fa-lock"></i></span></div>
+                // The chapter number is in the FIRST span, second span may contain lock icon
+                val eplNumElement = element.selectFirst(".epl-num")
+                val chapterNum = eplNumElement?.selectFirst("span")?.text()?.trim()
+                    ?: eplNumElement?.ownText()?.trim()
+                    ?: ""
+                val chapterTitle = element.selectFirst(".epl-title")?.text()?.trim() ?: ""
+                val dateStr = element.selectFirst(".epl-date")?.text()?.trim() ?: ""
+
+                // Check for locked status - look for lock icon or price indicator
+                val isLocked = element.selectFirst(".fa-lock, .fas.fa-lock, i[class*='lock']") != null ||
+                    element.select(".epl-price").text().let {
+                        !it.contains("Free", ignoreCase = true) && it.isNotEmpty()
+                    } || chapterNum.contains("🔒")
 
                 var name = if (chapterTitle.isNotEmpty()) chapterTitle else "Chapter $chapterNum"
                 if (isLocked) {
@@ -160,21 +202,72 @@ open class LightNovelWPNovel(
             }
         }
 
-        return chapters
+        // Reverse for proper order (newest first in source, but we want oldest first for reader)
+        return chapters.reversed()
     }
 
-    override fun pageListParse(response: Response): List<Page> = emptyList()
+    override fun pageListParse(response: Response): List<Page> {
+        // Return a page with the chapter URL for fetchPageText
+        val url = response.request.url.encodedPath
+        return listOf(Page(0, url))
+    }
 
     override fun imageUrlParse(response: Response): String = ""
 
     override suspend fun fetchPageText(page: Page): String {
         val response = client.newCall(GET(baseUrl + page.url, headers)).execute()
-        val doc = response.asJsoup()
+        val html = response.body.string()
+        val doc = Jsoup.parse(html)
 
-        // Remove unwanted elements
-        doc.select(".unlock-buttons, .ads, script, style").remove()
+        // Remove unwanted elements first
+        doc.select(
+            ".unlock-buttons, .ads, script, style, .sharedaddy, .code-block, .su-spoiler-title, " +
+                "noscript, ins, .adsbygoogle, iframe, [id*=google], [class*=google]",
+        ).remove()
 
-        return doc.selectFirst(".epcontent, .entry-content, #chapter-content")?.html() ?: ""
+        // LightNovelWP sites may have multiple .epcontent.entry-content divs
+        // The actual content is usually the one with the most paragraphs
+        val contentCandidates = doc.select(".epcontent.entry-content, .epcontent, .entry-content")
+
+        // Find the content div with the most paragraph text
+        val bestContent = contentCandidates
+            .toList()
+            .filter { it.select("p").isNotEmpty() }
+            .maxByOrNull { element -> element.select("p").sumOf { p -> p.text().length } }
+
+        if (bestContent != null && bestContent.text().length > 100) {
+            return bestContent.html()
+        }
+
+        // Fallback: Try other selectors
+        val fallbackSelectors = listOf(
+            "#chapter-content",
+            ".reading-content",
+            ".text-left",
+            ".chapter-content",
+            "article .entry-content",
+        )
+
+        for (selector in fallbackSelectors) {
+            val content = doc.selectFirst(selector)
+            if (content != null && content.text().length > 100) {
+                return content.html()
+            }
+        }
+
+        // Last resort: LNReader regex approach
+        val contentMatch = Regex("""<div[^>]*class="epcontent[^"]*"[^>]*>([^]*?)<div[^>]*class="?bottomnav""")
+            .find(html)?.groupValues?.get(1)
+
+        if (contentMatch != null) {
+            val paragraphs = Regex("""<p[^>]*>([^]*?)</p>""")
+                .findAll(contentMatch)
+                .map { "<p>${it.groupValues[1]}</p>" }
+                .joinToString("\n")
+            if (paragraphs.isNotEmpty()) return paragraphs
+        }
+
+        return ""
     }
 
     override fun getFilterList(): FilterList = FilterList(
@@ -185,6 +278,10 @@ open class LightNovelWPNovel(
     protected fun parseDate(dateStr: String): Long {
         return try {
             // Basic parsing, can be improved
+            val date = dateStr.trim()
+            if (date.isEmpty()) return 0L
+
+            // Try common formats if needed, for now just return 0
             0L
         } catch (e: Exception) {
             0L

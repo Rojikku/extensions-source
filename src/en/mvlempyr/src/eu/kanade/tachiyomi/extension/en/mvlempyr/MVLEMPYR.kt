@@ -13,10 +13,17 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
+import okhttp3.Headers
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
-import uy.kohesive.injekt.injectLazy
 import java.math.BigInteger
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -24,145 +31,146 @@ import java.util.Locale
 class MVLEMPYR : HttpSource(), NovelSource {
 
     override val name = "MVLEMPYR"
-    override val baseUrl = "https://www.mvlempyr.com"
+    override val baseUrl = "https://www.mvlempyr.io"
     override val lang = "en"
     override val supportsLatest = true
 
+    override val isNovelSource = true
+
     override val client = network.cloudflareClient
 
-    private val json: Json by injectLazy()
+    override fun headersBuilder(): Headers.Builder = super.headersBuilder()
+        .add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+        .add("Referer", chapSite)
+        .add("Origin", chapSite)
+
+    private val json: Json = Json { ignoreUnknownKeys = true }
     private val chapSite = "https://chap.heliosarchive.online"
     private val assetsSite = "https://assets.mvlempyr.app/images/600"
 
-    // Cache for all novels
-    private var cachedNovels: List<NovelApiData>? = null
+    // WordPress API Response structure
+    @Serializable
+    private data class WpNovel(
+        val id: Int = 0,
+        val date: String? = null,
+        val slug: String = "",
+        val title: WpRendered = WpRendered(),
+        val content: WpRendered = WpRendered(),
+        val excerpt: WpRendered = WpRendered(),
+        @SerialName("featured_media") val featuredMedia: Int = 0,
+        val genres: List<Int> = emptyList(),
+        val tags: List<Long> = emptyList(),
+        @SerialName("author-name") val authorName: String? = null,
+        val bookid: String? = null,
+        @SerialName("novel-code") val novelCode: Long? = null,
+    )
 
     @Serializable
-    private data class NovelApiData(
-        @SerialName("author-name") val authorName: String? = null,
-        val name: String? = null,
-        val slug: String = "",
-        @SerialName("associated-names") val associatedNames: String? = null,
-        val genre: List<String> = emptyList(),
-        val tags: List<String> = emptyList(),
-        @SerialName("synopsis-text") val synopsisText: String? = null,
-        @SerialName("novel-code") val novelCode: Int = 0,
-        @SerialName("total-chapters") val totalChapters: Int = 0,
-        @SerialName("average-review") val averageReview: Double = 0.0,
-        @SerialName("read-link") val readLink: String? = null,
-        val status: String? = null,
-        val createdOn: String? = null,
-        val language: String? = null,
-        val synopsis: String? = null,
-        @SerialName("total-reviews") val totalReviews: Int = 0,
-        val rank: Int = 0,
-        @SerialName("monthly-rank") val monthlyRank: Int = 0,
-        @SerialName("weekly-rank") val weeklyRank: Int = 0,
+    private data class WpRendered(
+        val rendered: String = "",
     )
 
     @Serializable
     private data class ChapterPost(
         val id: Int = 0,
         val date: String? = null,
+        val link: String? = null,
+        val title: WpRendered = WpRendered(),
         val acf: ChapterAcf? = null,
     )
 
     @Serializable
     private data class ChapterAcf(
         @SerialName("ch_name") val chName: String? = null,
-        @SerialName("novel_code") val novelCode: String? = null,
-        @SerialName("chapter_number") val chapterNumber: String? = null,
+        @SerialName("novel_code") val novelCode: kotlinx.serialization.json.JsonElement? = null,
+        @SerialName("chapter_number") val chapterNumber: kotlinx.serialization.json.JsonElement? = null,
     )
 
-    // Fetch all novels from API
-    private fun getAllNovels(): List<NovelApiData> {
-        cachedNovels?.let { return it }
-
-        val response = client.newCall(
-            GET("$chapSite/wp-json/wp/v2/mvl-novels?per_page=10000&page=1", headers),
-        ).execute()
-
-        val novels = json.decodeFromString<List<NovelApiData>>(response.body.string())
-        cachedNovels = novels
-        return novels
-    }
-
     override fun popularMangaRequest(page: Int): Request {
-        return GET("$chapSite/wp-json/wp/v2/mvl-novels?per_page=10000&page=$page", headers)
+        // Order by comment_count for popularity (or id desc as fallback)
+        return GET("$chapSite/wp-json/wp/v2/mvl-novels?per_page=20&page=$page&orderby=id&order=desc", headers)
     }
 
     override fun popularMangaParse(response: Response): MangasPage {
-        val novels = getAllNovels()
-        val sorted = novels.sortedByDescending { it.totalReviews }
-
-        val url = response.request.url.toString()
-        val pageMatch = Regex("page=(\\d+)").find(url)
-        val currentPage = pageMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1
-
-        val paginatedNovels = sorted.drop((currentPage - 1) * 20).take(20)
-            .map { createSManga(it) }
-
-        return MangasPage(paginatedNovels, sorted.size > currentPage * 20)
+        return parseNovelsResponse(response)
     }
 
     override fun latestUpdatesRequest(page: Int): Request {
-        return GET("$chapSite/wp-json/wp/v2/mvl-novels?per_page=10000&page=$page&_sort=created", headers)
+        return GET("$chapSite/wp-json/wp/v2/mvl-novels?per_page=20&page=$page&orderby=date&order=desc", headers)
     }
 
     override fun latestUpdatesParse(response: Response): MangasPage {
-        val novels = getAllNovels()
-        val sorted = novels.sortedByDescending { parseCreatedDate(it.createdOn) }
-
-        val url = response.request.url.toString()
-        val pageMatch = Regex("page=(\\d+)").find(url)
-        val currentPage = pageMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1
-
-        val paginatedNovels = sorted.drop((currentPage - 1) * 20).take(20)
-            .map { createSManga(it) }
-
-        return MangasPage(paginatedNovels, sorted.size > currentPage * 20)
+        return parseNovelsResponse(response)
     }
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        return GET("$chapSite/wp-json/wp/v2/mvl-novels?per_page=10000&page=$page&search=$query", headers)
+        val encodedQuery = java.net.URLEncoder.encode(query, "UTF-8")
+        return GET("$chapSite/wp-json/wp/v2/mvl-novels?per_page=20&page=$page&search=$encodedQuery", headers)
     }
 
     override fun searchMangaParse(response: Response): MangasPage {
-        val allNovels = getAllNovels()
-
-        val url = response.request.url.toString()
-        val searchMatch = Regex("search=([^&]+)").find(url)
-        val query = searchMatch?.groupValues?.get(1)?.lowercase() ?: ""
-        val pageMatch = Regex("page=(\\d+)").find(url)
-        val currentPage = pageMatch?.groupValues?.get(1)?.toIntOrNull() ?: 1
-
-        val filtered = if (query.isNotEmpty()) {
-            allNovels.filter { novel ->
-                novel.name?.lowercase()?.contains(query) == true ||
-                    novel.associatedNames?.lowercase()?.contains(query) == true
-            }
-        } else {
-            allNovels
-        }
-
-        val paginatedNovels = filtered.drop((currentPage - 1) * 20).take(20)
-            .map { createSManga(it) }
-
-        return MangasPage(paginatedNovels, filtered.size > currentPage * 20)
+        return parseNovelsResponse(response)
     }
 
-    private fun createSManga(novel: NovelApiData): SManga = SManga.create().apply {
-        url = "/novel/${novel.slug}"
-        title = novel.name ?: "Untitled"
-        thumbnail_url = "$assetsSite/${novel.novelCode}.webp"
-        author = novel.authorName
-        genre = novel.genre.joinToString(", ")
-        description = novel.synopsisText ?: cleanHtml(novel.synopsis ?: "")
-        status = when (novel.status?.lowercase()) {
-            "ongoing" -> SManga.ONGOING
-            "completed" -> SManga.COMPLETED
-            else -> SManga.UNKNOWN
+    private fun parseNovelsResponse(response: Response): MangasPage {
+        val responseBody = response.body.string()
+
+        // Check pagination headers
+        val totalPages = response.header("X-WP-TotalPages")?.toIntOrNull() ?: 1
+        val currentPage = response.request.url.queryParameter("page")?.toIntOrNull() ?: 1
+        val hasNextPage = currentPage < totalPages
+
+        return try {
+            // Parse as JSON array manually to handle the WordPress format
+            val jsonArray = json.parseToJsonElement(responseBody).jsonArray
+
+            val novels = jsonArray.mapNotNull { element ->
+                try {
+                    val obj = element.jsonObject
+                    createSMangaFromJson(obj)
+                } catch (e: Exception) {
+                    null
+                }
+            }
+
+            MangasPage(novels, hasNextPage)
+        } catch (e: Exception) {
+            MangasPage(emptyList(), false)
         }
+    }
+
+    private fun createSMangaFromJson(obj: JsonObject): SManga = SManga.create().apply {
+        val slug = obj["slug"]?.jsonPrimitive?.content ?: ""
+
+        // Try multiple title fields: "name" (API), "title.rendered" (WP), "title" (fallback)
+        val titleRendered = obj["name"]?.jsonPrimitive?.content
+            ?: obj["title"]?.jsonObject?.get("rendered")?.jsonPrimitive?.content
+            ?: obj["title"]?.jsonPrimitive?.contentOrNull
+            ?: "Untitled"
+        val contentRendered = obj["content"]?.jsonObject?.get("rendered")?.jsonPrimitive?.content ?: ""
+        val excerptRendered = obj["excerpt"]?.jsonObject?.get("rendered")?.jsonPrimitive?.content ?: ""
+        val synopsisText = obj["synopsis-text"]?.jsonPrimitive?.content
+            ?: obj["synopsis"]?.jsonPrimitive?.contentOrNull
+        val bookId = obj["bookid"]?.jsonPrimitive?.content
+        val novelCode = obj["novel-code"]?.jsonPrimitive?.longOrNull
+        val authorNameValue = obj["author-name"]?.jsonPrimitive?.content
+
+        url = "/novel/$slug"
+        title = cleanHtml(titleRendered)
+        author = authorNameValue
+
+        // Use novelCode for thumbnail if available, otherwise bookid
+        thumbnail_url = if (novelCode != null) {
+            "$assetsSite/$novelCode.webp"
+        } else if (!bookId.isNullOrBlank()) {
+            "$assetsSite/$bookId.webp"
+        } else {
+            null
+        }
+
+        // Use synopsis-text, synopsis, excerpt or content for description
+        description = synopsisText?.let { cleanHtml(it) }
+            ?: cleanHtml(excerptRendered.ifBlank { contentRendered })
     }
 
     override fun mangaDetailsParse(response: Response): SManga {
@@ -170,7 +178,24 @@ class MVLEMPYR : HttpSource(), NovelSource {
 
         return SManga.create().apply {
             title = doc.selectFirst("h1.novel-title")?.text() ?: "Untitled"
-            description = doc.selectFirst("div.synopsis.w-richtext")?.text()?.trim() ?: ""
+
+            // Parse associated names/alternative titles and include in description
+            val associatedNamesText = doc.select("div.additionalinfo.tm10 > div.textwrapper")
+                .find { it.selectFirst("span")?.text()?.contains("Associated Names", ignoreCase = true) == true }
+                ?.selectFirst("span:last-child, a")?.text()?.trim()
+
+            var desc = doc.selectFirst("div.synopsis.w-richtext")?.text()?.trim() ?: ""
+            if (!associatedNamesText.isNullOrBlank()) {
+                // Split by common delimiters and clean
+                val altTitles = associatedNamesText.split(",", ";", "/", "|")
+                    .mapNotNull { it.trim().takeIf { s -> s.isNotBlank() && s != title } }
+                    .distinct()
+                if (altTitles.isNotEmpty()) {
+                    desc = "Alternative Titles: ${altTitles.joinToString(", ")}\n\n$desc"
+                }
+            }
+
+            description = desc
             author = doc.select("div.additionalinfo.tm10 > div.textwrapper")
                 .find { it.selectFirst("span")?.text()?.contains("Author") == true }
                 ?.selectFirst("a, span:last-child")?.text() ?: ""
@@ -205,7 +230,7 @@ class MVLEMPYR : HttpSource(), NovelSource {
                 continue
             }
 
-            val chapData = json.decodeFromString<List<ChapterPost>>(chaptersJson)
+            val chapData: List<ChapterPost> = json.decodeFromString(chaptersJson)
 
             if (chapData.isEmpty()) {
                 hasMore = false
@@ -215,15 +240,17 @@ class MVLEMPYR : HttpSource(), NovelSource {
             chapData.forEach { chap ->
                 val acf = chap.acf ?: return@forEach
                 val chapterName = acf.chName ?: "Chapter"
-                val chapterNumber = acf.chapterNumber ?: ""
-                val novelCodeStr = acf.novelCode ?: ""
+                val chapterNumberStr = acf.chapterNumber?.jsonPrimitive?.contentOrNull
+                    ?: acf.chapterNumber?.jsonPrimitive?.intOrNull?.toString()
+                    ?: ""
+                val novelCodeStr = acf.novelCode?.jsonPrimitive?.content ?: ""
 
                 chapters.add(
                     SChapter.create().apply {
-                        url = "/chapter/$novelCodeStr-$chapterNumber"
+                        url = "/chapter/$novelCodeStr-$chapterNumberStr"
                         name = chapterName
                         date_upload = parseDate(chap.date)
-                        chapter_number = chapterNumber.toFloatOrNull() ?: 0f
+                        chapter_number = chapterNumberStr.toFloatOrNull() ?: 0f
                     },
                 )
             }
@@ -237,14 +264,26 @@ class MVLEMPYR : HttpSource(), NovelSource {
     }
 
     override fun pageListParse(response: Response): List<Page> {
-        val chapterUrl = response.request.url.toString().removePrefix(baseUrl)
+        // The chapter URL format is /chapter/{novelCode}-{chapterNumber}
+        val chapterUrl = response.request.url.toString()
         return listOf(Page(0, chapterUrl))
     }
 
     override suspend fun fetchPageText(page: Page): String {
-        val response = client.newCall(GET(baseUrl + page.url, headers)).execute()
+        // Chapter content is on chap.heliosarchive.online
+        val url = if (page.url.startsWith("http")) {
+            page.url
+        } else {
+            // page.url is like /chapter/{novelCode}-{chapterNumber}
+            "$chapSite${page.url}"
+        }
+        val response = client.newCall(GET(url, headers)).execute()
         val doc = Jsoup.parse(response.body.string())
-        return doc.selectFirst("#chapter")?.html() ?: ""
+        // Content is in #chapter-content #chapter based on API docs
+        return doc.selectFirst("#chapter-content #chapter")?.html()
+            ?: doc.selectFirst("#chapter")?.html()
+            ?: doc.selectFirst(".ChapterContent")?.html()
+            ?: ""
     }
 
     override fun imageUrlParse(response: Response): String = ""

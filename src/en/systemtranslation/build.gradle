@@ -1,0 +1,11 @@
+ext {
+    extName = 'System Translation'
+    extClass = '.SystemTranslation'
+    themePkg = 'lightnovelwpnovel'
+    baseUrl = 'https://systemtranslation.com'
+    overrideVersionCode = 1
+    isNsfw = false
+    isNovel = true
+}
+
+apply from: "$rootDir/common.gradle"

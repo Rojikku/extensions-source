@@ -28,13 +28,16 @@ class Fenrirealm : HttpSource(), NovelSource {
     override val lang = "en"
     override val supportsLatest = true
 
+    // isNovelSource is provided by NovelSource interface with default value true
+
     override val client = network.cloudflareClient
 
     private val json: Json by injectLazy()
 
+    // API base URL - from instructions.txt: /api/new/v2
     private val apiBaseUrl = "$baseUrl/api/new/v2"
 
-    // Popular novels
+    // Popular novels - GET /api/new/v2/home/popular-series
     override fun popularMangaRequest(page: Int): Request {
         return GET("$apiBaseUrl/home/popular-series", headers)
     }
@@ -44,9 +47,9 @@ class Fenrirealm : HttpSource(), NovelSource {
         return MangasPage(novels.map { it.toSManga(baseUrl) }, false)
     }
 
-    // Latest updates
+    // Latest updates - GET /api/new/v2/series?page=1&per_page=12&status=any&sort=latest
     override fun latestUpdatesRequest(page: Int): Request {
-        return GET("$apiBaseUrl/series?page=$page&per_page=12&sort=latest&status=any", headers)
+        return GET("$apiBaseUrl/series?page=$page&per_page=20&status=any&sort=latest", headers)
     }
 
     override fun latestUpdatesParse(response: Response): MangasPage {
@@ -55,12 +58,14 @@ class Fenrirealm : HttpSource(), NovelSource {
         return MangasPage(result.data.map { it.toSManga(baseUrl) }, hasNextPage)
     }
 
-    // Search
+    // Search - GET /api/new/v2/series?page=1&per_page=12&search=world&status=any&sort=latest
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val url = "$apiBaseUrl/series".toHttpUrl().newBuilder().apply {
             addQueryParameter("page", page.toString())
-            addQueryParameter("per_page", "12")
-            addQueryParameter("search", query)
+            addQueryParameter("per_page", "20")
+            if (query.isNotEmpty()) {
+                addQueryParameter("search", query)
+            }
 
             filters.forEach { filter ->
                 when (filter) {
@@ -98,37 +103,44 @@ class Fenrirealm : HttpSource(), NovelSource {
 
     override fun searchMangaParse(response: Response): MangasPage = latestUpdatesParse(response)
 
-    // Manga details - request goes to API
+    // Manga details - parse from API response using slug
     override fun mangaDetailsRequest(manga: SManga): Request {
         val slug = manga.url.removePrefix("/").removeSuffix("/")
-        return GET("$apiBaseUrl/series/$slug", headers)
+        // Use the series endpoint with search to get details
+        return GET("$apiBaseUrl/series?search=$slug&per_page=1", headers)
     }
 
     override fun mangaDetailsParse(response: Response): SManga {
-        val novel = json.decodeFromString<NovelDto>(response.body.string())
-        return novel.toSManga(baseUrl)
+        val result = json.decodeFromString<SearchResponse>(response.body.string())
+        return result.data.firstOrNull()?.toSManga(baseUrl) ?: SManga.create()
     }
 
-    // Chapter list - request goes to API
+    // Chapter list - GET /api/new/v2/series/{slug}/chapters
     override fun chapterListRequest(manga: SManga): Request {
         val slug = manga.url.removePrefix("/").removeSuffix("/")
         return GET("$apiBaseUrl/series/$slug/chapters", headers)
     }
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val chapters = json.decodeFromString<List<ChapterDto>>(response.body.string())
-        val slug = response.request.url.pathSegments.let {
-            it.getOrNull(it.size - 2) ?: ""
-        }
+        val chapters = json.decodeFromString<List<ChapterApiDto>>(response.body.string())
+        val slug = response.request.url.pathSegments.dropLast(1).lastOrNull() ?: ""
 
         return chapters.mapIndexed { index, chapter ->
             SChapter.create().apply {
-                url = chapter.url ?: "/series/$slug/${chapter.slug}"
-                name = chapter.title
-                chapter_number = chapter.chapterNumber?.toFloat() ?: (chapters.size - index).toFloat()
+                url = "/series/$slug/chapter-${chapter.number}"
+                name = buildString {
+                    // Only show locked icon if price > 0 (free chapters have price = 0 or null)
+                    val isLocked = chapter.locked?.price?.let { it > 0 } ?: false
+                    if (isLocked) append("🔒 ")
+                    append("Chapter ${chapter.number}")
+                    if (!chapter.title.isNullOrBlank() && chapter.title != "Chapter ${chapter.number}") {
+                        append(" - ${chapter.title}")
+                    }
+                }
+                chapter_number = chapter.number.toFloat()
                 date_upload = parseDate(chapter.createdAt)
             }
-        }.reversed()
+        }.sortedBy { it.chapter_number }
     }
 
     // Page list - return single page with chapter URL
@@ -137,11 +149,15 @@ class Fenrirealm : HttpSource(), NovelSource {
         return listOf(Page(0, chapterUrl))
     }
 
-    // Novel content
+    // Novel content - LN Reader uses #reader-area, but actual ID is dynamic like reader-area-110498
     override suspend fun fetchPageText(page: Page): String {
         val response = client.newCall(GET(baseUrl + page.url, headers)).execute()
         val doc = Jsoup.parse(response.body.string())
-        return doc.selectFirst("div.epcontent.entry-content")?.html()
+        // Try various selectors for content - ID starts with reader-area
+        return doc.selectFirst("div[id^=reader-area]")?.html()
+            ?: doc.selectFirst("#reader-area")?.html()
+            ?: doc.selectFirst("div.content-area")?.html()
+            ?: doc.selectFirst("div.epcontent.entry-content")?.html()
             ?: doc.selectFirst("div.entry-content")?.html()
             ?: ""
     }
@@ -213,7 +229,10 @@ class Fenrirealm : HttpSource(), NovelSource {
                 null
             }
             this.description = buildString {
-                this@NovelDto.description?.let { append(it) }
+                this@NovelDto.description?.let { // Sanitize HTML from description
+                    val cleanDesc = Jsoup.parse(it).text()
+                    append(cleanDesc)
+                }
                 altTitle?.let {
                     if (it.isNotEmpty()) {
                         if (isNotEmpty()) append("\n\n")
@@ -270,6 +289,20 @@ class Fenrirealm : HttpSource(), NovelSource {
         @SerialName("created_at") val createdAt: String? = null,
     )
 
+    @Serializable
+    data class ChapterApiDto(
+        val number: Int,
+        val title: String? = null,
+        val slug: String? = null,
+        @SerialName("created_at") val createdAt: String? = null,
+        val locked: LockedDto? = null,
+    )
+
+    @Serializable
+    data class LockedDto(
+        val price: Int? = null,
+    )
+
     // Filter classes
     private class StatusFilter : Filter.Select<String>(
         "Status",
@@ -285,13 +318,11 @@ class Fenrirealm : HttpSource(), NovelSource {
 
     private class SortFilter : Filter.Select<String>(
         "Sort",
-        arrayOf("Latest", "Popular", "A-Z", "Z-A"),
+        arrayOf("Latest", "Popular"),
     ) {
         fun toUriPart() = when (state) {
             0 -> "latest"
             1 -> "popular"
-            2 -> "az"
-            3 -> "za"
             else -> "latest"
         }
     }

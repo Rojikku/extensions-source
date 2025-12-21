@@ -1,0 +1,9 @@
+ext {
+    extName = 'NovelHub'
+    extClass = '.NovelHub'
+    extVersionCode = 1
+    isNsfw = false
+    isNovel = true
+}
+
+apply from: "$rootDir/common.gradle"

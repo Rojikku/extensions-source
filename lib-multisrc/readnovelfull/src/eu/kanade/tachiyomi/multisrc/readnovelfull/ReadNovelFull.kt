@@ -1,9 +1,13 @@
 package eu.kanade.tachiyomi.multisrc.readnovelfull
 
+import android.app.Application
+import android.content.SharedPreferences
+import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.NovelSource
-import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
@@ -16,6 +20,8 @@ import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 import java.text.SimpleDateFormat
 import java.util.Locale
 
@@ -38,11 +44,17 @@ abstract class ReadNovelFull(
     override val name: String,
     override val baseUrl: String,
     override val lang: String,
-) : ParsedHttpSource(), NovelSource {
+) : ParsedHttpSource(), NovelSource, ConfigurableSource {
+
+    // isNovelSource is provided by NovelSource interface with default value true
 
     override val supportsLatest = true
 
     override val client = network.cloudflareClient
+
+    private val preferences: SharedPreferences by lazy {
+        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
+    }
 
     // Configuration options - can be overridden by child classes
     protected open val latestPage: String = "latest-release-novel"
@@ -68,10 +80,10 @@ abstract class ReadNovelFull(
         }
     }
 
-    override fun popularMangaSelector() = "div.col-novel-main div.list-novel div.row, div.archive div.row"
+    override fun popularMangaSelector() = "div.col-novel-main div.list-novel div.row, div.archive div.row, div.index-intro div.item, div.ul-list1 div.li, div.col-l div.li, div.col-r div.li"
 
     override fun popularMangaFromElement(element: Element): SManga = SManga.create().apply {
-        val link = element.selectFirst("h3.novel-title a, .novel-title a, a.cover")
+        val link = element.selectFirst("h3.novel-title a, .novel-title a, a.cover, h3.tit a, .txt h3.tit a, div.txt h3.tit a, div.con a")
         if (link != null) {
             title = link.text().trim().ifEmpty { link.attr("title") }
             setUrlWithoutDomain(link.attr("abs:href"))
@@ -82,8 +94,12 @@ abstract class ReadNovelFull(
                 setUrlWithoutDomain(it.attr("abs:href"))
             }
         }
-        thumbnail_url = element.selectFirst("img")?.let {
-            it.attr("data-src").ifEmpty { it.attr("src") }
+        // Try multiple image selectors for different site structures
+        // Use abs:src and abs:data-src to handle relative URLs
+        thumbnail_url = element.selectFirst("img")?.let { img ->
+            img.attr("abs:data-src").ifEmpty { img.attr("abs:src") }
+        } ?: element.selectFirst("div.pic img, div.s1 img")?.let { img ->
+            img.attr("abs:data-src").ifEmpty { img.attr("abs:src") }
         }
     }
 
@@ -99,9 +115,24 @@ abstract class ReadNovelFull(
         }
     }
 
-    override fun latestUpdatesSelector() = popularMangaSelector()
+    override fun latestUpdatesSelector() = popularMangaSelector() + ", ul.ul-list2 li"
 
-    override fun latestUpdatesFromElement(element: Element) = popularMangaFromElement(element)
+    override fun latestUpdatesFromElement(element: Element): SManga {
+        // Handle ul-list2 li structure for FreeWebNovel latest updates
+        if (element.tagName() == "li" && element.selectFirst("div.s1.con") != null) {
+            return SManga.create().apply {
+                val link = element.selectFirst("a.tit")
+                if (link != null) {
+                    title = link.attr("title").ifEmpty { link.text().trim() }
+                    setUrlWithoutDomain(link.attr("abs:href"))
+                }
+                thumbnail_url = element.selectFirst("div.pic img")?.let { img ->
+                    img.attr("abs:data-src").ifEmpty { img.attr("abs:src") }
+                }
+            }
+        }
+        return popularMangaFromElement(element)
+    }
 
     override fun latestUpdatesNextPageSelector() = popularMangaNextPageSelector()
 
@@ -131,17 +162,17 @@ abstract class ReadNovelFull(
     // ======================== Details ========================
 
     override fun mangaDetailsParse(document: Document): SManga = SManga.create().apply {
-        document.selectFirst("div.books, div.book, div.m-imgtxt")?.let { info ->
+        document.selectFirst("div.books, div.book, div.m-imgtxt, div.m-book1")?.let { info ->
             thumbnail_url = info.selectFirst("img")?.let {
                 it.attr("data-src").ifEmpty { it.attr("src") }
             }
-            title = info.selectFirst("h3.title, img")?.let {
-                it.attr("title").ifEmpty { it.text() }
+            title = info.selectFirst("h3.title, h1.tit, img")?.let {
+                it.text().ifEmpty { it.attr("title") }
             } ?: ""
         }
 
         // Parse info section
-        document.select("div.info div, ul.info-meta li").forEach { element ->
+        document.select("div.info div, ul.info-meta li, div.m-imgtxt div.item").forEach { element ->
             val text = element.text()
             when {
                 text.contains("Author", ignoreCase = true) -> {
@@ -158,7 +189,8 @@ abstract class ReadNovelFull(
             }
         }
 
-        description = document.selectFirst("div.desc-text, div.inner, div.desc")?.text()?.trim()
+        // Try multiple selectors for description
+        description = document.selectFirst("div.desc-text, div.inner, div.desc, div.m-desc div.txt div.inner")?.text()?.trim()
     }
 
     private fun parseStatus(status: String): Int = when {
@@ -253,7 +285,9 @@ abstract class ReadNovelFull(
         // Try multiple selectors for chapter content
         val contentSelectors = listOf(
             "div#chr-content",
+            "div#chr-content.chr-c",
             "div#chapter-content",
+            "div#article",
             "div.txt",
             "div.chapter-content",
             "div.content",
@@ -262,6 +296,10 @@ abstract class ReadNovelFull(
         for (selector in contentSelectors) {
             val content = document.selectFirst(selector)
             if (content != null) {
+                if (preferences.getBoolean(PREF_RAW_HTML, false)) {
+                    return content.html()
+                }
+
                 // Remove ads and unwanted elements
                 content.select("div.ads, div.unlock-buttons, sub, script, ins, .adsbygoogle").remove()
 
@@ -273,13 +311,20 @@ abstract class ReadNovelFull(
         return ""
     }
 
-    // ======================== Filters ========================
+    // ======================== Settings ========================
 
-    override fun getFilterList(): FilterList = FilterList(
-        Filter.Header("Filters are not supported for this source"),
-    )
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        val rawHtmlPref = SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_RAW_HTML
+            title = "Return raw HTML"
+            summary = "If enabled, returns the raw HTML of the chapter content instead of parsed text. Useful for custom parsers."
+            setDefaultValue(false)
+        }
+        screen.addPreference(rawHtmlPref)
+    }
 
     companion object {
+        private const val PREF_RAW_HTML = "pref_raw_html"
         private val DATE_FORMAT = SimpleDateFormat("MMM dd, yyyy", Locale.US)
     }
 }

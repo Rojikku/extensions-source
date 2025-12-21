@@ -1,7 +1,12 @@
 package eu.kanade.tachiyomi.extension.en.novelupdates
 
+import android.app.Application
+import android.content.SharedPreferences
+import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.POST
+import eu.kanade.tachiyomi.source.ConfigurableSource
 import eu.kanade.tachiyomi.source.NovelSource
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -15,8 +20,10 @@ import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 
-class NovelUpdates : HttpSource(), NovelSource {
+class NovelUpdates : HttpSource(), NovelSource, ConfigurableSource {
 
     override val name = "Novel Updates"
     override val baseUrl = "https://www.novelupdates.com"
@@ -24,6 +31,10 @@ class NovelUpdates : HttpSource(), NovelSource {
     override val supportsLatest = true
 
     override val client = network.cloudflareClient
+
+    private val preferences: SharedPreferences by lazy {
+        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
+    }
 
     // Novel source implementation
     override suspend fun fetchPageText(page: Page): String {
@@ -51,8 +62,26 @@ class NovelUpdates : HttpSource(), NovelSource {
             throw Exception("Captcha detected, please open in webview.")
         }
 
+        if (preferences.getBoolean(PREF_RETURN_FULL_HTML, false)) {
+            return body
+        }
+
         // Try to extract chapter content based on the domain
         return getChapterBody(doc, domainParts, url)
+    }
+
+    override fun setupPreferenceScreen(screen: PreferenceScreen) {
+        val fullHtmlPref = SwitchPreferenceCompat(screen.context).apply {
+            key = PREF_RETURN_FULL_HTML
+            title = "Return full HTML"
+            summary = "If enabled, returns the full chapter HTML without extracting the content. Useful for custom parsers."
+            setDefaultValue(false)
+        }
+        screen.addPreference(fullHtmlPref)
+    }
+
+    companion object {
+        private const val PREF_RETURN_FULL_HTML = "pref_return_full_html"
     }
 
     private fun getChapterBody(doc: Document, domain: List<String>, url: String): String {
@@ -218,10 +247,18 @@ class NovelUpdates : HttpSource(), NovelSource {
 
             val type = doc.select("#showtype").text().trim()
             val summary = doc.select("#editdescription").text().trim()
-            description = if (type.isNotEmpty()) {
-                "$summary\n\nType: $type"
-            } else {
-                summary
+
+            // Extract tags from a.genre elements (tags section)
+            val tags = doc.select("#showtags a.genre").joinToString(", ") { it.text() }
+
+            description = buildString {
+                append(summary)
+                if (type.isNotEmpty()) {
+                    append("\n\nType: $type")
+                }
+                if (tags.isNotEmpty()) {
+                    append("\n\nTags: $tags")
+                }
             }
         }
     }
@@ -315,16 +352,20 @@ class NovelUpdates : HttpSource(), NovelSource {
 
         return when {
             sortValue == "popmonth" || sortValue == "popular" -> {
-                "$baseUrl/series-ranking/?rank=$sortValue"
+                "$baseUrl/series-ranking/?rank=$sortValue&pg=$page"
             }
             sortValue == "latest" -> {
                 buildString {
                     append("$baseUrl/latest-series/?st=1")
 
-                    val selectedGenres = genreFilter.state.filter { it.state }.map { it.id }
-                    if (selectedGenres.isNotEmpty()) {
-                        append("&gi=").append(selectedGenres.joinToString(","))
+                    val includedGenres = genreFilter.state.filter { it.isIncluded() }.map { it.id }
+                    val excludedGenres = genreFilter.state.filter { it.isExcluded() }.map { it.id }
+                    if (includedGenres.isNotEmpty()) {
+                        append("&gi=").append(includedGenres.joinToString(","))
                         append("&mgi=and")
+                    }
+                    if (excludedGenres.isNotEmpty()) {
+                        append("&ge=").append(excludedGenres.joinToString(","))
                     }
 
                     val selectedLanguages = languageFilter.state.filter { it.state }.map { it.id }
@@ -339,10 +380,14 @@ class NovelUpdates : HttpSource(), NovelSource {
                 buildString {
                     append("$baseUrl/series-finder/?sf=1")
 
-                    val selectedGenres = genreFilter.state.filter { it.state }.map { it.id }
-                    if (selectedGenres.isNotEmpty()) {
-                        append("&gi=").append(selectedGenres.joinToString(","))
+                    val includedGenres = genreFilter.state.filter { it.isIncluded() }.map { it.id }
+                    val excludedGenres = genreFilter.state.filter { it.isExcluded() }.map { it.id }
+                    if (includedGenres.isNotEmpty()) {
+                        append("&gi=").append(includedGenres.joinToString(","))
                         append("&mgi=and")
+                    }
+                    if (excludedGenres.isNotEmpty()) {
+                        append("&ge=").append(excludedGenres.joinToString(","))
                     }
 
                     val selectedLanguages = languageFilter.state.filter { it.state }.map { it.id }
@@ -424,10 +469,10 @@ class NovelUpdates : HttpSource(), NovelSource {
         }
     }
 
-    private class Genre(name: String, val id: String) : Filter.CheckBox(name)
+    private class Genre(name: String, val id: String) : Filter.TriState(name)
 
     private class GenreFilter : Filter.Group<Genre>(
-        "Genres",
+        "Genres (0=ignore, 1=include, 2=exclude)",
         listOf(
             Genre("Action", "8"),
             Genre("Adult", "280"),

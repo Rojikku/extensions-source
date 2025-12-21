@@ -3,17 +3,24 @@ package eu.kanade.tachiyomi.extension.en.readfromnet
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.NovelSource
 import eu.kanade.tachiyomi.source.model.FilterList
+import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import eu.kanade.tachiyomi.source.online.ParsedHttpSource
+import eu.kanade.tachiyomi.source.online.HttpSource
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
+import java.net.URLEncoder
 
-class ReadFromNet : ParsedHttpSource(), NovelSource {
+/**
+ * ReadFromNet novel source - ported from LN Reader plugin
+ * @see https://github.com/LNReader/lnreader-plugins readfrom.ts
+ */
+class ReadFromNet : HttpSource(), NovelSource {
 
     override val name = "ReadFromNet"
 
@@ -23,126 +30,219 @@ class ReadFromNet : ParsedHttpSource(), NovelSource {
 
     override val supportsLatest = true
 
-    // Popular Manga (Novels)
+    // ======================== Popular ========================
 
     override fun popularMangaRequest(page: Int): Request {
-        // Placeholder: Assuming a list page exists
-        return GET("$baseUrl/list/$page", headers)
+        return GET("$baseUrl/allbooks/page/$page/", headers)
     }
 
-    override fun popularMangaSelector() = ".book-list .book-item" // Placeholder
-
-    override fun popularMangaFromElement(element: Element): SManga {
-        return SManga.create().apply {
-            title = element.select("h3").text()
-            setUrlWithoutDomain(element.select("a").attr("href"))
-            thumbnail_url = element.select("img").attr("src")
-        }
+    override fun popularMangaParse(response: Response): MangasPage {
+        val doc = response.asJsoup()
+        val novels = parseNovels(doc, isSearch = false)
+        val hasNextPage = doc.selectFirst("div.navigation a:contains(Next)") != null
+        return MangasPage(novels, hasNextPage)
     }
 
-    override fun popularMangaNextPageSelector() = ".pagination .next" // Placeholder
+    // ======================== Latest ========================
 
-    // Latest Updates
+    override fun latestUpdatesRequest(page: Int): Request {
+        return GET("$baseUrl/last_added_books/page/$page/", headers)
+    }
 
-    override fun latestUpdatesRequest(page: Int) = popularMangaRequest(page)
+    override fun latestUpdatesParse(response: Response): MangasPage {
+        return popularMangaParse(response)
+    }
 
-    override fun latestUpdatesSelector() = popularMangaSelector()
-
-    override fun latestUpdatesFromElement(element: Element) = popularMangaFromElement(element)
-
-    override fun latestUpdatesNextPageSelector() = popularMangaNextPageSelector()
-
-    // Search
+    // ======================== Search ========================
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        return GET("$baseUrl/search?q=$query", headers) // Placeholder
+        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+        return GET("$baseUrl/build_in_search/?q=$encodedQuery", headers)
     }
 
-    override fun searchMangaSelector() = popularMangaSelector()
+    override fun searchMangaParse(response: Response): MangasPage {
+        val doc = response.asJsoup()
+        // LN Reader: search uses "div.text > article.box" selector
+        val novels = parseNovels(doc, isSearch = true)
+        return MangasPage(novels, false) // Search doesn't support pagination
+    }
 
-    override fun searchMangaFromElement(element: Element) = popularMangaFromElement(element)
+    // ======================== Parsing ========================
 
-    override fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
+    private fun parseNovels(doc: Document, isSearch: Boolean): List<SManga> {
+        // LN Reader uses different selectors for search vs browse
+        val selector = if (isSearch) "div.text > article.box" else "#dle-content > article.box"
 
-    // Manga Details
+        return doc.select(selector).mapNotNull { element ->
+            try {
+                val titleElement = element.selectFirst("h2.title a") ?: return@mapNotNull null
+                val title = titleElement.text().trim()
+                // LN Reader: .replace('https://readfrom.net/', '').replace(/^\//, '')
+                var url = titleElement.attr("href")
 
-    override fun mangaDetailsParse(document: Document): SManga {
-        return SManga.create().apply {
-            title = document.select("h1").text()
-            description = document.select(".description").text()
-            // Add more details
+                // Simple replacement as per LN Reader TS
+                // replace('https://readfrom.net/', '').replace(/^\//, '')
+                url = url.replace("https://readfrom.net/", "")
+                    .replace(Regex("^/"), "")
+
+                val cover = element.selectFirst("img")?.attr("src") ?: ""
+
+                SManga.create().apply {
+                    this.title = title
+                    this.url = url
+                    thumbnail_url = cover
+                }
+            } catch (e: Exception) {
+                null
+            }
         }
     }
 
-    // Chapters
+    // ======================== Details ========================
 
-    override fun chapterListSelector() = "div.pages > a"
+    override fun mangaDetailsRequest(manga: SManga): Request {
+        return GET("$baseUrl/${manga.url}", headers)
+    }
+
+    override fun mangaDetailsParse(response: Response): SManga {
+        val doc = response.asJsoup()
+
+        return SManga.create().apply {
+            // LN Reader: splits by ", \n\n" and takes first part
+            title = doc.selectFirst("center > h2.title")?.text()
+                ?.split(", \n\n")?.firstOrNull()?.trim() ?: ""
+
+            thumbnail_url = doc.selectFirst("article.box > div > center > div > a > img")?.attr("src")
+
+            // Parse from detail page directly (no caching per instructions.html)
+            val descElement = doc.selectFirst("div.text3, div.text5")
+            descElement?.select(".coll-ellipsis, a")?.remove()
+            // Include hidden content (from .coll-hidden span)
+            val hiddenContent = descElement?.selectFirst("span.coll-hidden")?.text() ?: ""
+            var desc = (descElement?.text()?.trim() ?: "") + " " + hiddenContent
+
+            // LN Reader: Add series info if present (center > b:has(a) with /series.html link)
+            val seriesElement = doc.select("center > b:has(a)").firstOrNull { el ->
+                el.selectFirst("a")?.attr("href")?.startsWith("/series.html") == true
+            }
+            if (seriesElement != null) {
+                desc = "${seriesElement.text().trim()}\n\n$desc"
+            }
+            description = desc.trim()
+
+            author = doc.select("h4 > a").firstOrNull()?.text()?.trim()
+            genre = doc.select("h2 > a")
+                .toList()
+                .filter { it.attr("title").startsWith("Genre - ") }
+                .joinToString(", ") { it.text().trim() }
+
+            // LN Reader: checks for status text
+            status = when {
+                doc.text().contains("Completed", ignoreCase = true) -> SManga.COMPLETED
+                doc.text().contains("Ongoing", ignoreCase = true) -> SManga.ONGOING
+                else -> SManga.UNKNOWN
+            }
+        }
+    }
+
+    // ======================== Chapters ========================
+
+    override fun chapterListRequest(manga: SManga): Request {
+        return GET("$baseUrl/${manga.url}", headers)
+    }
 
     override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
+        val doc = response.asJsoup()
         val chapters = mutableListOf<SChapter>()
+        val novelPath = response.request.url.encodedPath.trimStart('/')
 
-        // First chapter is the page itself
+        // LN Reader: First chapter is the page itself (page 1)
         chapters.add(
             SChapter.create().apply {
-                name = "Chapter 1"
-                url = response.request.url.toString().replace(baseUrl, "")
+                name = "1"
+                url = novelPath
                 chapter_number = 1f
             },
         )
 
-        // Other chapters from pagination
-        document.select(chapterListSelector()).forEach { element ->
-            chapters.add(chapterFromElement(element))
+        // LN Reader: Get pagination from div.pages > a
+        doc.selectFirst("div.pages")?.select("> a")?.forEachIndexed { index, element ->
+            // LN Reader: .replace('https://readfrom.net/', '').replace(/^\//, '')
+            var chapterUrl = element.attr("href")
+                .replace("https://readfrom.net", "")
+                .replace(baseUrl, "")
+
+            if (!chapterUrl.startsWith("/")) {
+                chapterUrl = "/$chapterUrl"
+            }
+
+            val chapterName = element.text().trim()
+
+            chapters.add(
+                SChapter.create().apply {
+                    name = chapterName
+                    url = chapterUrl
+                    chapter_number = (index + 2).toFloat()
+                },
+            )
         }
 
         return chapters
     }
 
-    override fun chapterFromElement(element: Element): SChapter {
-        return SChapter.create().apply {
-            name = element.text()
-            url = element.attr("href")
-            // Try to parse chapter number
-            val num = element.text().toFloatOrNull()
-            if (num != null) {
-                chapter_number = num
-            }
-        }
+    // ======================== Pages ========================
+
+    override fun pageListParse(response: Response): List<Page> {
+        return listOf(Page(0, response.request.url.toString()))
     }
 
-    // Page List (Novel Content)
+    override fun imageUrlParse(response: Response): String = ""
 
-    override fun pageListParse(document: Document): List<Page> {
-        return listOf(Page(0, document.location(), ""))
-    }
-
-    override fun imageUrlParse(document: Document) = ""
+    // ======================== Novel Content ========================
 
     override suspend fun fetchPageText(page: Page): String {
         val response = client.newCall(GET(page.url, headers)).execute()
-        val document = response.asJsoup()
+        val doc = response.asJsoup()
 
-        val contentElement = document.selectFirst("#textToRead") ?: return ""
+        val textElement = doc.selectFirst("#textToRead") ?: return ""
 
-        // Cleanup
-        contentElement.select("span:empty, center").remove()
+        // LN Reader: Remove empty spans and center elements
+        textElement.select("span:empty, center").remove()
 
-        val sb = StringBuilder()
+        val chapterHtml = StringBuilder()
+        var paragraph = StringBuilder()
 
-        contentElement.childNodes().forEach { node ->
-            if (node is TextNode) {
-                val text = node.text().trim()
-                if (text.isNotEmpty()) {
-                    sb.append("<p>").append(text).append("</p>")
+        // LN Reader: Process child nodes, accumulating text into paragraphs
+        // When hitting an Element node, flush the paragraph and add the element
+        textElement.childNodes().forEach { node ->
+            when {
+                node is TextNode -> {
+                    val content = node.text().trim()
+                    if (content.isNotEmpty()) {
+                        paragraph.append(content).append(" ")
+                    }
                 }
-            } else if (node is Element && node.tagName() != "br") {
-                sb.append(node.outerHtml())
+                node is Element -> {
+                    // Flush accumulated text as paragraph
+                    if (paragraph.isNotEmpty()) {
+                        chapterHtml.append("<p>").append(paragraph.toString().trim()).append("</p>")
+                        paragraph = StringBuilder()
+                    }
+                    // Skip br tags, add other elements
+                    if (node.tagName() != "br") {
+                        chapterHtml.append(node.outerHtml())
+                    }
+                }
             }
         }
 
-        return sb.toString()
+        // Close any remaining paragraph
+        if (paragraph.isNotEmpty()) {
+            chapterHtml.append("<p>").append(paragraph.toString().trim()).append("</p>")
+        }
+
+        return chapterHtml.toString()
     }
 
-    private fun Response.asJsoup(): Document = org.jsoup.Jsoup.parse(body?.string() ?: "")
+    private fun Response.asJsoup(): Document = Jsoup.parse(body.string())
 }

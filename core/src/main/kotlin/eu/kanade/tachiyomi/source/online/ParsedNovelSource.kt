@@ -12,6 +12,8 @@ import org.jsoup.nodes.Document
  */
 abstract class ParsedNovelSource : ParsedHttpSource(), NovelSource {
 
+    // isNovelSource is provided by NovelSource interface with default value true
+
     override suspend fun fetchPageText(page: Page): String {
         val response = client.newCall(GET(page.url, headers)).execute()
         val document = response.asJsoup()

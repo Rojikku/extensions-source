@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.extension.en.wtrlab
 
 import android.app.Application
+import android.util.Log
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
@@ -18,6 +19,8 @@ import eu.kanade.tachiyomi.source.online.HttpSource
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -55,6 +58,40 @@ class WtrLab : HttpSource(), NovelSource, ConfigurableSource {
             .add("Content-Type", "application/json")
             .add("Accept", "application/json")
             .build()
+    }
+
+    private val imgBaseUrl = "https://wtr-lab.com/api/v2/img"
+
+    // Convert image URL to wtr-lab API format
+    // Example: "https://img.wtr-lab.com/cdn/series/JtiyvIDCk8L3qSgbIIAO2BPQ-xP-szSp7LbLKfz7yJ8.jpg"
+    // becomes: "https://wtr-lab.com/api/v2/img?src=s3://wtrimg/series/JtiyvIDCk8L3qSgbIIAO2BPQ-xP-szSp7LbLKfz7yJ8.jpg&w=344"
+    private fun transformImageUrl(imageUrl: String?): String? {
+        if (imageUrl.isNullOrBlank()) return null
+
+        // If already a wtr-lab API URL, return as-is
+        if (imageUrl.startsWith("$imgBaseUrl")) return imageUrl
+
+        // Extract the path from various URL formats
+        val path = when {
+            imageUrl.contains("img.wtr-lab.com/cdn/") -> {
+                // Format: https://img.wtr-lab.com/cdn/series/xxx.jpg
+                imageUrl.substringAfter("img.wtr-lab.com/cdn/")
+            }
+            imageUrl.contains("wtrimg/") -> {
+                // Format: s3://wtrimg/series/xxx.jpg or similar
+                imageUrl.substringAfter("wtrimg/")
+            }
+            imageUrl.startsWith("/") -> {
+                // Relative path
+                imageUrl.removePrefix("/")
+            }
+            else -> return imageUrl // Unknown format, return as-is
+        }
+
+        // Build the API URL with encoded s3 path
+        val s3Path = "s3://wtrimg/$path"
+        val encodedPath = java.net.URLEncoder.encode(s3Path, "UTF-8")
+        return "$imgBaseUrl?src=$encodedPath&w=344"
     }
 
     // Cache buildId for Next.js data fetching
@@ -121,14 +158,29 @@ class WtrLab : HttpSource(), NovelSource, ConfigurableSource {
             "<a i=$index>$text</a>"
         }
 
-        // Build the full request as nested arrays: [[[paragraph1, paragraph2, ...], "zh-CN", "en"], "te_lib"]
-        val fullBody = "[[${formattedParagraphs.joinToString(",") { "\"$it\"" }},\"zh-CN\",\"en\"],\"te_lib\"]"
+        // Build the full request using proper JSON serialization for correct escaping
+        // Format: [[[para1, para2, ...], "zh-CN", "en"], "te_lib"]
+        val innerArray = buildJsonArray {
+            add(
+                buildJsonArray {
+                    formattedParagraphs.forEach { add(it) }
+                },
+            )
+            add("zh-CN")
+            add("en")
+        }
+        val fullBody = buildJsonArray {
+            add(innerArray)
+            add("te_lib")
+        }
+        val bodyString = json.encodeToString(JsonArray.serializer(), fullBody)
 
         val request = Request.Builder()
             .url("https://translate-pa.googleapis.com/v1/translateHtml")
-            .header("Content-Type", "application/json+protobuf")
             .header("X-Goog-Api-Key", apiKey)
-            .post(fullBody.toRequestBody("application/json+protobuf".toMediaType()))
+            .header("Origin", "https://wtr-lab.com")
+            .header("Referer", "https://wtr-lab.com/")
+            .post(bodyString.toRequestBody("application/json+protobuf".toMediaType()))
             .build()
 
         val response = client.newCall(request).execute()
@@ -138,19 +190,31 @@ class WtrLab : HttpSource(), NovelSource, ConfigurableSource {
         }
 
         val responseBody = response.body.string()
+        Log.d("WtrLab", "Google Translate Response: $responseBody")
 
         return try {
-            // Parse response: expected format [[[[translated1],[translated2],...]]]]
+            // Parse response: format is [["<html string>"]]
             val jsonResponse = json.parseToJsonElement(responseBody).jsonArray
-            val translatedArray = jsonResponse[0].jsonArray[0].jsonArray
 
-            // Extract translated paragraphs
-            val translatedParagraphs = translatedArray.map { it.jsonArray[0].jsonPrimitive.content }
+            if (jsonResponse.isEmpty()) {
+                throw Exception("Empty response from Google Translate")
+            }
 
-            // Build HTML from translated paragraphs
-            translatedParagraphs.joinToString("") { "<p>$it</p>" }
+            // The response is [[text_content]] - outer array, then inner array, then the string
+            val innerArray = jsonResponse[0]
+            if (innerArray !is JsonArray || innerArray.isEmpty()) {
+                throw Exception("Invalid response structure: expected array inside array")
+            }
+
+            val translatedHtml = innerArray[0].jsonPrimitive.contentOrNull
+                ?: throw Exception("Could not extract translated text from response")
+
+            // The HTML contains <a i=N> tags and encoded content, return it as-is
+            // Google Translate returns the full HTML with all formatting preserved
+            translatedHtml
         } catch (e: Exception) {
             // Fallback to decrypted content if parsing fails
+            Log.e("WtrLab", "Failed to parse Google Translate response: ${e.message}", e)
             paragraphs.joinToString("") { "<p>$it</p>" }
         }
     }
@@ -166,34 +230,55 @@ class WtrLab : HttpSource(), NovelSource, ConfigurableSource {
         val rawId = match.groupValues[1].toInt()
         val chapterNo = match.groupValues[2].toInt()
 
-        val translationMode = getTranslationMode()
+        var translationMode = getTranslationMode()
 
         // Determine API translate parameter:
-        // - "ai" mode: send "ai" to get server-side AI translation
-        // - "raw" mode: send "raw" to get encrypted raw content
-        // - "web" (Google Translate) mode: send "raw" to get encrypted content, then translate locally
-        val apiTranslateParam = when (translationMode) {
+        // - "ai" mode: server-side AI translation (TS plugin uses this)
+        // - "web" mode: encrypted content intended for web-translation flow
+        // - "raw" mode: encrypted raw content
+        var apiTranslateParam = when (translationMode) {
             "ai" -> "ai"
-            else -> "raw" // Both "raw" and "web" modes need encrypted content
+            "web" -> "web"
+            "raw" -> "raw"
+            else -> "ai"
         }
 
-        val requestBody = buildJsonObject {
-            put("translate", apiTranslateParam)
-            put("language", "en")
-            put("raw_id", rawId)
-            put("chapter_no", chapterNo)
-            put("retry", false)
-            put("force_retry", false)
-        }.toString().toRequestBody("application/json".toMediaType())
+        fun createRequest(mode: String): okhttp3.Request {
+            val body = buildJsonObject {
+                put("translate", mode)
+                put("language", "en")
+                put("raw_id", rawId)
+                put("chapter_no", chapterNo)
+                put("retry", false)
+                put("force_retry", false)
+            }.toString().toRequestBody("application/json".toMediaType())
+            return POST("$baseUrl/api/reader/get", apiHeaders, body)
+        }
 
-        val request = POST("$baseUrl/api/reader/get", apiHeaders, requestBody)
-        val response = client.newCall(request).execute()
+        var response = client.newCall(createRequest(apiTranslateParam)).execute()
+        var responseBody = response.body.string()
+
+        // Check if AI mode failed, and fallback to RAW mode if so
+        if (apiTranslateParam == "ai") {
+            val isFailure = !response.isSuccessful || try {
+                val j = json.parseToJsonElement(responseBody).jsonObject
+                j["success"]?.jsonPrimitive?.content != "true" && j["success"]?.jsonPrimitive?.contentOrNull?.toBoolean() != true
+            } catch (e: Exception) { true }
+
+            if (isFailure) {
+                // Fallback to raw
+                translationMode = "raw"
+                apiTranslateParam = "raw"
+                response = client.newCall(createRequest(apiTranslateParam)).execute()
+                responseBody = response.body.string()
+            }
+        }
 
         if (!response.isSuccessful) {
             throw Exception("API request failed: ${response.code} ${response.message}")
         }
 
-        val jsonResult = json.parseToJsonElement(response.body.string()).jsonObject
+        val jsonResult = json.parseToJsonElement(responseBody).jsonObject
 
         if (jsonResult["success"]?.jsonPrimitive?.content != "true" && jsonResult["success"]?.jsonPrimitive?.contentOrNull?.toBoolean() != true) {
             val error = jsonResult["error"]?.jsonPrimitive?.contentOrNull ?: "Unknown error"
@@ -277,8 +362,12 @@ class WtrLab : HttpSource(), NovelSource, ConfigurableSource {
 
     override fun popularMangaParse(response: Response): MangasPage {
         val jsonResult = json.parseToJsonElement(response.body.string()).jsonObject
-        val series = jsonResult["pageProps"]?.jsonObject?.get("series")?.jsonArray
+        val pageProps = jsonResult["pageProps"]?.jsonObject
+        val series = pageProps?.get("series")?.jsonArray
             ?: return MangasPage(emptyList(), false)
+
+        val count = pageProps["count"]?.jsonPrimitive?.intOrNull ?: 0
+        Log.d("WtrLab", "Popular/Search: series.size=${series.size}, count=$count")
 
         val seenIds = mutableSetOf<Int>()
         val mangas = series.mapNotNull { element ->
@@ -294,13 +383,14 @@ class WtrLab : HttpSource(), NovelSource, ConfigurableSource {
 
             SManga.create().apply {
                 title = data?.get("title")?.jsonPrimitive?.contentOrNull ?: ""
-                thumbnail_url = data?.get("image")?.jsonPrimitive?.contentOrNull
+                thumbnail_url = transformImageUrl(data?.get("image")?.jsonPrimitive?.contentOrNull)
                 url = "/en/novel/$rawId/$slug"
             }
         }
 
         // Check if there are more pages
-        val hasNextPage = mangas.isNotEmpty() && mangas.size >= 20
+        // Use series.size (raw count) instead of mangas.size (filtered count) to avoid premature end
+        val hasNextPage = series.isNotEmpty()
 
         return MangasPage(mangas, hasNextPage)
     }
@@ -327,7 +417,7 @@ class WtrLab : HttpSource(), NovelSource, ConfigurableSource {
 
             SManga.create().apply {
                 title = serieData?.get("title")?.jsonPrimitive?.contentOrNull ?: ""
-                thumbnail_url = serieData?.get("image")?.jsonPrimitive?.contentOrNull
+                thumbnail_url = transformImageUrl(serieData?.get("image")?.jsonPrimitive?.contentOrNull)
                 url = "/en/novel/$rawId/$slug"
             }
         }
@@ -389,8 +479,8 @@ class WtrLab : HttpSource(), NovelSource, ConfigurableSource {
                 is TagFilter -> {
                     val included = filter.state.filter { it.isIncluded() }.map { it.value }
                     val excluded = filter.state.filter { it.isExcluded() }.map { it.value }
-                    if (included.isNotEmpty()) params.add("tags=${included.joinToString(",")}")
-                    if (excluded.isNotEmpty()) params.add("tagsexclude=${excluded.joinToString(",")}")
+                    if (included.isNotEmpty()) params.add("ti=${included.joinToString(",")}")
+                    if (excluded.isNotEmpty()) params.add("te=${excluded.joinToString(",")}")
                 }
                 is FoldersFilter -> {
                     val value = filter.selected
@@ -436,8 +526,10 @@ class WtrLab : HttpSource(), NovelSource, ConfigurableSource {
                 if (serieData != null) {
                     val data = serieData["data"]?.jsonObject
                     manga.title = data?.get("title")?.jsonPrimitive?.contentOrNull ?: ""
-                    manga.thumbnail_url = data?.get("image")?.jsonPrimitive?.contentOrNull
-                    manga.description = data?.get("description")?.jsonPrimitive?.contentOrNull
+                    manga.thumbnail_url = transformImageUrl(data?.get("image")?.jsonPrimitive?.contentOrNull)
+                    manga.description = data?.get("description")?.jsonPrimitive?.contentOrNull?.let {
+                        Jsoup.parse(it).text()
+                    }
                     manga.author = data?.get("author")?.jsonPrimitive?.contentOrNull
 
                     manga.status = when (serieData["status"]?.jsonPrimitive?.intOrNull) {
@@ -460,8 +552,10 @@ class WtrLab : HttpSource(), NovelSource, ConfigurableSource {
         }
 
         if (manga.thumbnail_url == null) {
-            manga.thumbnail_url = doc.selectFirst(".image-wrap img")?.attr("src")
-                ?: doc.selectFirst(".img-wrap > img")?.attr("src")
+            manga.thumbnail_url = transformImageUrl(
+                doc.selectFirst(".image-wrap img")?.attr("src")
+                    ?: doc.selectFirst(".img-wrap > img")?.attr("src"),
+            )
         }
 
         if (manga.description == null) {

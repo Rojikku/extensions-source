@@ -34,6 +34,8 @@ abstract class ReadWN(
     override val lang: String,
 ) : ParsedHttpSource(), NovelSource {
 
+    // isNovelSource is provided by NovelSource interface with default value true
+
     override val supportsLatest = true
 
     override val client = network.cloudflareClient

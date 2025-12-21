@@ -1,0 +1,11 @@
+ext {
+    extName = 'Translatin Otaku'
+    extClass = '.TranslatinOtaku'
+    themePkg = 'madaranovel'
+    baseUrl = 'https://translatinotaku.net'
+    overrideVersionCode = 1
+    isNsfw = false
+    isNovel = true
+}
+
+apply from: "$rootDir/common.gradle"

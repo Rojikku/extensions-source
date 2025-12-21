@@ -32,6 +32,8 @@ abstract class LightNovelWP(
     override val lang: String,
 ) : ParsedHttpSource(), NovelSource {
 
+    // isNovelSource is provided by NovelSource interface with default value true
+
     override val supportsLatest = true
 
     override val client = network.cloudflareClient
@@ -164,14 +166,26 @@ abstract class LightNovelWP(
                     setUrlWithoutDomain(it.attr("abs:href"))
                 }
 
-                // Get chapter number from epl-num
-                val chapterNum = element.selectFirst(".epl-num")?.text()?.trim()
+                // LightNovelWP HTML structure:
+                // <li data-ID="...">
+                //   <a href="...">
+                //     <div class="epl-num"><span>Ch. 50</span><span><i class="fas fa-lock"></i></span></div>
+                //     <div class="epl-title">Chapter Title</div>
+                //     <div class="epl-date">March 16, 2026</div>
+                //   </a>
+                // </li>
+
+                // Get chapter number from first span inside epl-num
+                val eplNumDiv = element.selectFirst(".epl-num")
+                val chapterNumText = eplNumDiv?.selectFirst("span")?.text()?.trim()
+                    ?: eplNumDiv?.ownText()?.trim()
                 val chapterTitle = element.selectFirst(".epl-title")?.text()?.trim()
                 val releaseDate = element.selectFirst(".epl-date")?.text()?.trim()
                 val price = element.selectFirst(".epl-price")?.text()?.trim()
 
-                // Check if chapter is locked
-                val isLocked = chapterNum?.contains("🔒") == true ||
+                // Check if chapter is locked - look for lock icon or emoji
+                val isLocked = element.selectFirst(".fa-lock, .fas.fa-lock, i[class*='lock']") != null ||
+                    eplNumDiv?.text()?.contains("🔒") == true ||
                     (price != null && price.lowercase() != "free" && price.isNotEmpty())
 
                 // Build chapter name
@@ -179,16 +193,16 @@ abstract class LightNovelWP(
                     if (isLocked) append("🔒 ")
                     if (chapterTitle != null) {
                         append(chapterTitle)
-                    } else if (chapterNum != null) {
-                        append("Chapter $chapterNum")
+                    } else if (chapterNumText != null) {
+                        append("Chapter $chapterNumText")
                     } else {
                         append("Chapter ${index + 1}")
                     }
                 }
 
-                // Extract chapter number
-                chapter_number = chapterNum?.replace("🔒", "")?.trim()?.toFloatOrNull()
-                    ?: (index + 1).toFloat()
+                // Extract chapter number from text like "Ch. 50" or "50"
+                val numMatch = chapterNumText?.let { Regex("""(\d+(?:\.\d+)?)""").find(it)?.groupValues?.get(1) }
+                chapter_number = numMatch?.toFloatOrNull() ?: (index + 1).toFloat()
 
                 // Parse date if available
                 date_upload = releaseDate?.let { parseDate(it) } ?: 0L
