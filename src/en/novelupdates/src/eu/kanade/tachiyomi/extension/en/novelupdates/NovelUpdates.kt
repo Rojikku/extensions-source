@@ -22,7 +22,7 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
-
+//mostly ported from LNReader
 class NovelUpdates : HttpSource(), NovelSource, ConfigurableSource {
 
     override val name = "Novel Updates"
@@ -36,10 +36,7 @@ class NovelUpdates : HttpSource(), NovelSource, ConfigurableSource {
         Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
     }
 
-    // Novel source implementation
     override suspend fun fetchPageText(page: Page): String {
-        // NovelUpdates is an aggregator - chapters link to external sites
-        // We need to fetch the external chapter and parse its content
         val chapterUrl = page.url
 
         val response = client.newCall(GET(chapterUrl, headers)).execute()
@@ -49,7 +46,6 @@ class NovelUpdates : HttpSource(), NovelSource, ConfigurableSource {
 
         val doc = Jsoup.parse(body, url)
 
-        // Handle CAPTCHA cases
         val title = doc.select("title").text().trim().lowercase()
         val blockedTitles = listOf(
             "bot verification",
@@ -231,7 +227,6 @@ class NovelUpdates : HttpSource(), NovelSource, ConfigurableSource {
         }
     }
 
-    // Popular novels
     override fun popularMangaRequest(page: Int): Request {
         return GET("$baseUrl/series-ranking/?rank=popmonth&pg=$page", headers)
     }
@@ -251,7 +246,6 @@ class NovelUpdates : HttpSource(), NovelSource, ConfigurableSource {
         return parseNovelsFromSearch(doc)
     }
 
-    // Search
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
         val url = if (query.isNotEmpty()) {
             val searchTerm = query.replace(Regex("[''']"), "'").replace(Regex("\\s+"), "+")
@@ -279,14 +273,12 @@ class NovelUpdates : HttpSource(), NovelSource, ConfigurableSource {
             }
         }
 
-        // Check if there's a next page
         val hasNextPage = doc.select(".digg_pagination a.next_page").isNotEmpty() ||
             doc.select(".pagination a:contains(Next)").isNotEmpty()
 
         return MangasPage(novels, hasNextPage)
     }
 
-    // Manga details
     override fun mangaDetailsRequest(manga: SManga): Request {
         return GET(baseUrl + manga.url, headers)
     }
@@ -330,7 +322,6 @@ class NovelUpdates : HttpSource(), NovelSource, ConfigurableSource {
         }
     }
 
-    // Chapter list
     override fun chapterListRequest(manga: SManga): Request {
         return GET(baseUrl + manga.url, headers)
     }
@@ -375,15 +366,13 @@ class NovelUpdates : HttpSource(), NovelSource, ConfigurableSource {
 
             SChapter.create().apply {
                 name = chapterName
-                url = fullUrl // Store the full external URL
+                url = fullUrl
                 date_upload = 0L
             }
         }.reversed()
     }
 
-    // Page list - return single page with the chapter URL
     override fun pageListRequest(chapter: SChapter): Request {
-        // chapter.url contains the external chapter URL
         return GET(chapter.url, headers)
     }
 
@@ -394,7 +383,6 @@ class NovelUpdates : HttpSource(), NovelSource, ConfigurableSource {
 
     override fun imageUrlParse(response: Response) = ""
 
-    // Filters
     override fun getFilterList() = FilterList(
         Filter.Header("NOTE: Filters are ignored if using text search!"),
         Filter.Separator(),
