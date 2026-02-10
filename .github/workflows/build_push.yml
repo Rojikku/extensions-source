@@ -51,9 +51,9 @@ jobs:
           cache-read-only: true
 
       - name: Get last successful CI commit
-        uses: nrwl/nx-set-shas@3e9ad7370203c1e93d109be57f3b72eb0eb511b1
+        uses: nrwl/nx-set-shas@3e9ad7370203c1e93d109be57f3b72eb0eb511b1 # v4.4.0
         with:
-          fallback-sha: 4b825dc642cb6eb9a060e54bf8d69288fbee4904
+          fallback-sha: 4b825dc642cb6eb9a060e54bf8d69288fbee4904 # empty tree
 
       - id: generate-matrices
         name: Create output matrices
@@ -97,34 +97,7 @@ jobs:
           KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
-          echo "MODULES: $MODULES"
-          # list gradle projects once for validation
-          ./gradlew projects --no-daemon > gradle-projects.txt || true
-          echo "Gradle projects:"
-          sed -n '1,200p' gradle-projects.txt || true
-
-          for TASK in $MODULES; do
-            echo "Processing requested task: $TASK"
-            PROJECT_PATH="${TASK%:*}"
-            if [ -z "$PROJECT_PATH" ]; then
-              echo "Invalid task format (no project path): $TASK — skipping"
-              continue
-            fi
-
-            # Check if project path exists in gradle projects output
-            if grep -Fq "$PROJECT_PATH" gradle-projects.txt; then
-              echo "Found project $PROJECT_PATH — running: ./gradlew $TASK"
-              ./gradlew "$TASK" --no-daemon || { echo "Task $TASK failed"; exit 1; }
-            else
-              echo "Project $PROJECT_PATH not found — skipping task $TASK"
-            fi
-          done
-
-      - name: List generated APKs (debug)
-        run: |
-          echo "Listing APKs produced by this build chunk (workspace root):"
-          find . -type f -name "*.apk" -print || true
-          echo "Count:"; find . -type f -name "*.apk" | wc -l || true
+          ./gradlew $MODULES
 
       - name: Upload APKs (${{ matrix.chunk.number }})
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
