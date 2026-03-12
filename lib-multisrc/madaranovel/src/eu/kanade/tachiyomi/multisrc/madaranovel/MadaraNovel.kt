@@ -61,11 +61,16 @@ open class MadaraNovel(
         get() = preferences.getBoolean(USE_NEW_CHAPTER_ENDPOINT_PREF, useNewChapterEndpointDefault)
 
     /**
+     * Override this in subclass to change the default value for chapter reversal.
+     */
+    protected open val reverseChapterListDefault: Boolean = false
+
+    /**
      * Whether to reverse the chapter list (show oldest first).
-     * Default is false (newest first).
+     * Default is false (newest first), override [reverseChapterListDefault] to change.
      */
     protected val reverseChapterList: Boolean
-        get() = preferences.getBoolean(PREF_REVERSE_CHAPTERS, false)
+        get() = preferences.getBoolean(PREF_REVERSE_CHAPTERS, reverseChapterListDefault)
 
     // LN Reader: Captcha title checks
     private val captchaTitles = listOf(
@@ -216,10 +221,13 @@ open class MadaraNovel(
             title = doc.selectFirst(".post-title h1, #manga-title h1")?.text()?.trim() ?: ""
 
             // Get cover from summary image
-            thumbnail_url = doc.selectFirst(".summary_image img")?.let { img ->
-                img.attr("data-lazy-src").ifEmpty { null }
-                    ?: img.attr("data-src").ifEmpty { null }
-                    ?: img.attr("src").ifEmpty { null }
+            val summaryImage = doc.selectFirst(".summary_image img")
+            thumbnail_url = if (summaryImage != null) {
+                summaryImage.attr("data-lazy-src").ifEmpty { null }
+                    ?: summaryImage.attr("data-src").ifEmpty { null }
+                    ?: summaryImage.attr("src").ifEmpty { null }
+            } else {
+                null
             }
 
             description = doc.selectFirst("div.summary__content")?.text()?.trim()
@@ -388,8 +396,14 @@ open class MadaraNovel(
         ).filterNotNull()
 
         // Select the candidate with the most paragraph tags (actual content)
-        val contentElement = candidates.maxByOrNull { element ->
-            element.select("p").sumOf { it.text().length }
+        var contentElement: org.jsoup.nodes.Element? = null
+        var maxParagraphText = -1
+        for (element in candidates) {
+            val paragraphTextLength = element.select("p").sumOf { it.text().length }
+            if (paragraphTextLength > maxParagraphText) {
+                maxParagraphText = paragraphTextLength
+                contentElement = element
+            }
         }
 
         if (preferences.getBoolean(PREF_RAW_HTML, false)) {
@@ -453,7 +467,7 @@ open class MadaraNovel(
             key = PREF_REVERSE_CHAPTERS
             title = "Reverse Chapter List"
             summary = "Show chapters in oldest-to-newest order instead of newest-to-oldest."
-            setDefaultValue(false)
+            setDefaultValue(reverseChapterListDefault)
         }.also(screen::addPreference)
 
         SwitchPreferenceCompat(screen.context).apply {
