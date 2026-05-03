@@ -1,4 +1,4 @@
-﻿package eu.kanade.tachiyomi.extension.all.epubkfcok
+package eu.kanade.tachiyomi.extension.en.epubkfcok
 
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.source.NovelSource
@@ -22,7 +22,7 @@ class EpubKfcok :
     NovelSource {
 
     override val name = "EPUB KFCok"
-    override val baseUrl = "https://epub.kfcok.net"
+    override val baseUrl = "https://fucknovelpia.com"
     override val lang = "all"
     override val supportsLatest = true
     override val isNovelSource = true
